@@ -1,0 +1,8 @@
+# Python-generated files
+app.pyc
+*.*~
+*.sw?
+.DS_Store
+postgres_data
+datastore
+
