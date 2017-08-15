@@ -29,6 +29,7 @@ urls = (
   r"/api/tickets/(\d+)/status", "TicketStatusAPI",
   r"/api/tickets/(\d+)/log", "TicketLogAPI",
   r"/api/tickets/(\d+)/progress", "TicketProgressAPI",
+  r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
   r"/api/pro/services/([\w\-]+)/claims", "ProviderServiceClaimsAPI",
@@ -38,7 +39,9 @@ urls = (
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/logs/(\d+)/attachments", "ProviderTicketLogAttachmentAPI",
   r"/api/pro/tickets/logs/(\d+)/status", "ProviderTicketLogStatusAPI",
-  r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI"
+  r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI",
+  r"/blobs/([a-f0-9]{8})", "DirectDownloadAPI",
+  r"/blobs/([a-f0-9]{32})", "DirectDownloadAPI"
   )
 
 # Create the web app
@@ -264,6 +267,15 @@ class TicketLogLogic:
       vars=locals())
     return len(res) > 0 and (state_list is None or res[0].state in state_list)
 
+  def check_consumer_access(self, user_id, state_list = None):
+
+    res = db.query(
+      "select L.id, L.state from ticket_log L, tickets T "
+      "where T.user_id = $user_id and T.id = L.ticket_id and L.id = $self.log_id",
+      vars=locals())
+
+    return len(res) > 0 and (state_list is None or res[0].state in state_list)
+
   # Create an attachment entry in the database and get ready to upload attachment
   def add_attachment(self, desc, filename, mime_type = None):
 
@@ -456,6 +468,17 @@ class TicketsAPIBase(AbstractAPI):
       self.raise_badrequest("Ticket %s not found for user %s" % (ticket_id,sess.user_id))
 
 
+  # Make sure we have access to a log entry
+  def check_log_entry_access(self, log_id):
+
+    # Make sure we are actually logged in
+    self.check_auth()
+
+    # Check if the ticket belongs to this user
+    if TicketLogLogic(log_id).check_consumer_access(sess.user_id, ('closed')) is False:
+      self.raise_badrequest("Log entry %s is not readable by user %s" % (log_id,sess.user_id))
+
+
 class TicketsAPI (TicketsAPIBase):
 
   # List all the tickets (tickets)
@@ -557,7 +580,22 @@ class TicketLogAPI (TicketsAPIBase):
     qresult = db.select("ticket_log", where="ticket_id=$ticket_id and state='closed'", vars=locals());
 
     web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['atime','category','attachments','message'])
+    return query_as_csv(qresult, ['id','atime','category','attachments','message'])
+
+
+class TicketLogAttachmentAPI (TicketsAPIBase):
+
+  def GET(self, log_id):
+
+    # Make sure we have access to this log entry
+    self.check_log_entry_access(log_id)
+
+    # Get the list of all attachments with URLs
+    qresult = db.select("ticket_log_attachment", where="log_id=$log_id", vars=locals());
+
+    # Return as CSV
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, ['description','mime_type','uuid'])
 
 
 class TicketProgressAPI (TicketsAPIBase):
@@ -881,6 +919,41 @@ class ProviderTicketProgressAPI (ProviderAPIBase):
       web.input().chunk_start, web.input().chunk_end, web.input().progress)
 
     return "success";
+
+
+# This API is for downloading blobs directly by a UUID code - clickable and shareable
+# links. There is no authentication involved
+class DirectDownloadAPI (AbstractAPI):
+
+  # There is only a GET method
+  def GET(self, hashstr):
+
+    # Find the blob in log attachments
+    pattern = hashstr + '%'
+    res = db.select("ticket_log_attachment", where="uuid like $pattern", vars=locals());
+
+    # Did we find a blob?
+    if len(res) == 0:
+      self.raise_badrequest("Resource %s not found" % hashstr)
+
+    # Get the dict for the first row
+    row = res[0]
+
+    # The directory of the file
+    filedir = '/home/mac/test/datastore/logdata/%08d' % int(row.log_id)
+
+    # Find the file in the directory
+    for file in os.listdir(filedir):
+      if file.startswith(row.uuid):
+        web.header("Content-Type", row.mime_type)
+        return open(filedir + '/' + file,"rb").read() # Notice 'rb' for reading images
+
+    self.raise_badrequest("Resource %s not found in directory" % hashstr)
+
+     
+
+
+
 
 
 
