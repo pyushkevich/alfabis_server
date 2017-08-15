@@ -2,22 +2,21 @@
 import web,sys
 import markdown
 import json
-import auth
 import os
 import hashlib
 import csv
 import StringIO
+import glob
+import uuid
+import mimetypes
 from pprint import pprint;
 from os import walk;
+from os.path import basename;
 
 # Needed for session support
 web.config.debug = False
 
-# create Google app & get app ID/secret from:
-# https://cloud.google.com/console
-auth.parameters['google']['app_id'] = '717316152908-m929hf2oc0agvfrb42e91srdn4j6813c.apps.googleusercontent.com'
-auth.parameters['google']['app_secret'] = 'NanyXsCP3txOBCtU9UeHM664'
-
+# URL mapping
 urls = (
   r'/', 'index',
   r"/login", "LoginPage",
@@ -27,7 +26,19 @@ urls = (
   r"/api/services", "ServicesAPI",
   r"/api/tickets", "TicketsAPI",
   r"/api/tickets/(\d+)/files", "TicketFilesAPI",
-  r"/api/tickets/(\d+)/status", "TicketStatusAPI"
+  r"/api/tickets/(\d+)/status", "TicketStatusAPI",
+  r"/api/tickets/(\d+)/log", "TicketLogAPI",
+  r"/api/tickets/(\d+)/progress", "TicketProgressAPI",
+  r"/api/pro/services", "ProviderServicesAPI",
+  r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
+  r"/api/pro/services/([\w\-]+)/claims", "ProviderServiceClaimsAPI",
+  r"/api/pro/tickets/(\d+)/files", "ProviderTicketFilesAPI",
+  r"/api/pro/tickets/(\d+)/files/(\d+)", "ProviderTicketFileDownloadAPI",
+  r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
+  r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
+  r"/api/pro/tickets/logs/(\d+)/attachments", "ProviderTicketLogAttachmentAPI",
+  r"/api/pro/tickets/logs/(\d+)/status", "ProviderTicketLogStatusAPI",
+  r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI"
   )
 
 # Create the web app
@@ -60,6 +71,16 @@ def render_markdown(page, *args):
   text = getattr(render, page)(*args);
   print text
   return render.style(md.convert(unicode(text)));
+
+# Determine mime type from filename or return octet stream
+def guess_mimetype(filename):
+  if mimetypes.inited is False:
+    mimetypes.init()
+  mime_type = mimetypes.guess_type(filename)[0]
+  if mime_type is None:
+    mime_type="application/octet-stream"
+  return mime_type
+
 
 # A class that handles authentication. When initialized, it tried to authenticate
 # and stores the result of the authentication in its state. It can also be used 
@@ -163,6 +184,183 @@ class LogoutPage:
     sess.kill()
     raise web.seeother('/')
 
+
+# ======================
+# Business Logic classes
+# ======================
+
+# Logic around tickets. This class is initialized around the ticket ID
+class TicketLogic:
+
+  def __init__(self, ticket_id):
+    self.ticket_id = ticket_id
+
+  def check_consumer_access(self, user_id, status_list = None):
+    res = db.select("tickets",where="user_id=$user_id and id=$self.ticket_id",vars=locals())
+    return len(res) > 0 and (status_list is None or res[0].status in status_list)
+
+  def check_provider_access(self, provider_id, status_list = None):
+    res = db.query(
+      "select T.id, T.status from tickets T, providers P "
+      "where T.service_id = P.service_id and P.user_id = $provider_id "
+      "  and T.id = $self.ticket_id",
+      vars=locals())
+    return len(res) > 0 and (status_list is None or res[0].status in status_list)
+
+  # Check that the specified provider has actually claimed this ticket 
+  def check_provider_claimed(self, provider_id):
+    res = db.select("claim_history", 
+      where="ticket_id=$self.ticket_id and provider_id=$provider_id",
+      vars=locals());
+    return len(res) > 0
+
+  # Add a message to the ticket log
+  def append_log(self, category, message, keep_open):
+    
+    if keep_open is True:
+      state='open'
+    else:
+      state='closed'
+
+    res = db.insert("ticket_log",
+      ticket_id=self.ticket_id, category=category, message=message, state=state)
+    return res
+
+  # Measure the total progress for a ticket
+  def total_progress(self):
+    res = db.query(
+      "select sum((chunk_end-chunk_start) * progress) as x from ticket_progress "
+      "where ticket_id=$self.ticket_id", 
+      vars=locals())
+    if len(res) > 0:
+      return res[0].x
+
+  # Update the progress of a ticket for a chunk
+  def set_chunk_progress(self, chunk_start, chunk_end, progress):
+    with db.transaction():
+      # Try to update the progress line
+      n = db.update("ticket_progress", 
+        where="ticket_id = $self.ticket_id and chunk_start=$chunk_start and chunk_end=$chunk_end", 
+        progress = progress, vars=locals())
+
+      # If nothing got updated, this means we need to insert
+      if n == 0:
+        db.insert("ticket_progress", 
+          ticket_id=self.ticket_id, chunk_start=chunk_start,
+          chunk_end=chunk_end, progress=progress)
+
+
+# Logic around ticket log messages. 
+class TicketLogLogic:
+
+  def __init__(self, log_id):
+    self.log_id = log_id
+
+  def check_provider_access(self, provider_id, state_list = None):
+    res = db.query(
+      "select L.id, L.state from ticket_log L, tickets T, providers P "
+      "where T.service_id = P.service_id and P.user_id = $provider_id "
+      "  and T.id = L.ticket_id and L.id = $self.log_id",
+      vars=locals())
+    return len(res) > 0 and (state_list is None or res[0].state in state_list)
+
+  # Create an attachment entry in the database and get ready to upload attachment
+  def add_attachment(self, desc, filename, mime_type = None):
+
+    # Create a new hash for the attachment
+    ahash = uuid.uuid4().hex
+
+    # Check for mime type
+    if mime_type is None:
+      mime_type = guess_mimetype(filename)
+
+    # Create a database entry
+    with db.transaction():
+      
+      # Insert the entry into log_attachment
+      res = db.insert("ticket_log_attachment", log_id=self.log_id, 
+        description=desc, mime_type=mime_type, uuid = ahash)
+
+      # Get the number of attachments
+      res2 = db.query(
+        "select count(id) from ticket_log_attachment "
+        "where log_id = $self.log_id", vars=locals())
+
+      # Update the attachment count
+      db.update("ticket_log", where="id = $self.log_id", attachments=res2[0].count, vars=locals())
+
+    # Create the directory for the output
+    filedir = '/home/mac/test/datastore/logdata/%08d' % int(self.log_id)
+    if not os.path.exists(filedir):
+      os.makedirs(filedir)
+
+    # Create the new filename based on the hash
+    filebase = basename(filename)
+    fullext = filebase[filebase.find('.'):]
+    newname = ahash + fullext;
+
+    # Create the filename where this attachment will be stored
+    afile = filedir +'/'+ newname
+
+    # Return a tuple of dbindex, hash, and filename
+    return (res, ahash, afile)
+
+  # Change the status of the log entry
+  def set_status(self, status):
+
+    return db.update("ticket_log", where="id = $self.log_id", state = status, vars=locals())
+
+
+
+
+
+
+# Logic around services. This class is initialized with a service ID
+class ServiceLogic:
+
+  def __init__(self, service_name):
+    self.service_name = service_name
+
+  def check_provider_access(self, provider_id):
+    res = db.query(
+      "select * from providers P, services S "
+      "where P.service_id = S.id and S.name=$self.service_name "
+      "  and user_id = $provider_id",
+      vars=locals());
+    return len(res) > 0
+
+  def claim_ticket(self, provider_id, provider_code):
+
+    # Create a transaction because this operation must be atomic
+    with db.transaction():
+
+      # Get the highest priority 'ready' ticket. TODO: For now the priority is just based
+      # on the ticket serial number, but this will need to be updated to use an actual
+      # prioritization system in the future
+      res = db.query(
+          "select T.id from tickets T, services S, providers P "
+          "where T.service_id = S.id and P.service_id = S.id "
+          "  and P.user_id = $provider_id and S.name = $self.service_name "
+          "  and T.status = 'ready' "
+          "order by T.id asc limit 1", vars=locals());
+
+      # Nothing returned? Means there are no ready tickets
+      if len(res) == 0:
+        return None
+
+      # Now we have a ticket
+      ticket_id = res[0].id
+
+      # Make an entry in the claims table, to keep track of this claim
+      db.insert("claim_history", ticket_id=ticket_id, provider_id=provider_id, provider_code=provider_code)
+
+      # Mark the ticket as claimed
+      db.update("tickets", where="id = $ticket_id", status = "claimed", vars=locals())
+
+      # Return the ticket ID
+      return ticket_id
+
+
 # =====================
 # RESTful API
 # =====================
@@ -173,8 +371,30 @@ def query_as_csv(qresult, fields):
   csvout.writerows(qresult)
   return strout.getvalue()
 
+def directory_as_csv(dir_path):
+  files = filter(os.path.isfile, glob.glob(dir_path + "/*"))
+  files.sort(key=lambda x: os.path.getmtime(x))
+  table = [(i,os.path.basename(files[i])) for i in range(len(files))]
+  strout = StringIO.StringIO()
+  csvout = csv.writer(strout)
+  csvout.writerows(table)
+  return strout.getvalue()
+
+def get_indexed_file(dir_path, index):
+  files = filter(os.path.isfile, glob.glob(dir_path + "/*"))
+  files.sort(key=lambda x: os.path.getmtime(x))
+  if index >= 0 and index < len(files):
+    return files[index]
+
 
 class AbstractAPI:
+
+  # The the file directory for a given ticket
+  def get_ticket_filedir(self, ticket_id):
+    filedir = '/home/mac/test/datastore/tickets/%08d' % int(ticket_id)
+    if not os.path.exists(filedir):
+      os.makedirs(filedir)
+    return filedir
 
   # Check if the user is authorized to be here
   def check_auth(self):
@@ -226,34 +446,14 @@ class TicketsAPIBase(AbstractAPI):
 
   # Make sure that the user has access to this particular
   # ticket. This also makes sure that the used is logged in
-  def check_ticket_access(self, ticket_id):
+  def check_ticket_access(self, ticket_id, status_list = None):
     
     # Make sure we are actually logged in
     self.check_auth()
 
     # Check if the ticket belongs to this user
-    user_id = sess.user_id
-    if len(db.select("tickets",where="user_id=$user_id and id=$ticket_id",vars=locals())) == 0:
+    if TicketLogic(ticket_id).check_consumer_access(sess.user_id, status_list) is False:
       self.raise_badrequest("Ticket %s not found for user %s" % (ticket_id,sess.user_id))
-
-  # Check ticket status: the status must be in one of the requested statuses
-  def check_ticket_status(self, ticket_id, status_list):
-
-    # Make sure we are actually logged in
-    self.check_auth()
-
-    # Check if the ticket belongs to this user
-    user_id = sess.user_id
-    res = db.select("tickets",where="user_id=$user_id and id=$ticket_id",vars=locals())
-
-    # Same as above (check access)
-    if len(res) == 0:
-      self.raise_badrequest("Ticket %s not found for user %s" % (ticket_id,sess.user_id))
-
-    # Check the status
-    ticket_status = res[0].status
-    if ticket_status not in status_list:
-      self.raise_badrequest("Ticket %s has invalid status (%s) for this operation" % (ticket_id,ticket_status))
 
 
 class TicketsAPI (TicketsAPIBase):
@@ -268,7 +468,8 @@ class TicketsAPI (TicketsAPIBase):
     user_id = sess.user_id
     qresult = db.query(
         ("select T.id, S.name, T.status from tickets T, services S "
-         "where T.service_id = S.id and T.user_id = $user_id"),
+         "where T.service_id = S.id and T.user_id = $user_id "
+         "order by T.id"),
         vars=locals());
 
     web.header('Content-Type','text/csv')
@@ -288,35 +489,26 @@ class TicketsAPI (TicketsAPIBase):
 
 class TicketFilesAPI (TicketsAPIBase):
 
-  def get_file_dir(self, ticket_id):
-    filedir = '/home/mac/test/datastore/tickets/%08d' % int(ticket_id)
-    if not os.path.exists(filedir):
-      os.makedirs(filedir)
-    return filedir
-
   def GET(self, ticket_id):
 
     # Make sure we have access to this ticket
     self.check_ticket_access(ticket_id)
     
-    filedir = self.get_file_dir(ticket_id)
-
-    for (dirpath, dirnames, filenames) in walk(filedir):
-      break
-    
-    return filenames
+    filedir = self.get_ticket_filedir(ticket_id)
+    web.header('Content-Type','text/csv')
+    return directory_as_csv(filedir)
 
   def POST(self, ticket_id):
 
     # Make sure we have access to this ticket
-    self.check_ticket_status(ticket_id, ['init'])
+    self.check_ticket_access(ticket_id, ['init'])
 
     # Data directory
     x = web.input(myfile={})
     print x.keys()
     # if 'file' in x.myfile and 'filename' in x.myfile:
     try:
-      filedir = self.get_file_dir(ticket_id)
+      filedir = self.get_ticket_filedir(ticket_id)
       filepath=x.myfile.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
       filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
 
@@ -347,15 +539,352 @@ class TicketStatusAPI (TicketsAPIBase):
     # Check if the current status is appropriate for the new status
     if new_status == "ready":
       with db.transaction():
-        self.check_ticket_status(ticket_id, "init")
+        self.check_ticket_access(ticket_id, ["init"])
         n = db.update("tickets", where="id = $ticket_id", status = new_status, vars=locals())
         return db.select("tickets", where="id=$ticket_id", vars=locals())[0].status;
 
     self.raise_badrequest("Changing ticket status to %s is not supported" % new_status)
 
+
+class TicketLogAPI (TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_access(ticket_id)
+
+    # Get all the _closed_ entries from the ticket log (open entries are still being written)
+    qresult = db.select("ticket_log", where="ticket_id=$ticket_id and state='closed'", vars=locals());
+
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, ['atime','category','attachments','message'])
+
+
+class TicketProgressAPI (TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_access(ticket_id)
+
+    # Return progres as a string
+    return TicketLogic(ticket_id).total_progress()
       
+
+# Base API for ticket provider classes    
+class ProviderAPIBase(AbstractAPI):
+
+  # Make sure that the user has access to the named service
+  def check_service_access_by_name(self, service_name):
+
+    # Make sure we are actually logged in
+    self.check_auth()
+
+    # Check if the user has access to this service's tickets
+    if ServiceLogic(service_name).check_provider_access(sess.user_id) is False:
+      self.raise_unauthorized("You are not a provider for service %s " % service_name)
     
+  # Check if the provider has access to a given ticket
+  def check_ticket_access(self, ticket_id, status_list = None):
+
+    # Make sure we are actually logged in
+    self.check_auth()
+
+    # Check if the ticket belongs to this user
+    if TicketLogic(ticket_id).check_provider_access(sess.user_id, status_list) is False:
+      self.raise_badrequest("Ticket %s not found for user %s" % (ticket_id,sess.user_id))
+
+  # Check if the provider has claimed the ticket
+  def check_ticket_claimed(self, ticket_id):
+
+    # Make sure we are actually logged in
+    self.check_auth()
+
+    # Check if the ticket belongs to this user
+    if TicketLogic(ticket_id).check_provider_claimed(sess.user_id) is False:
+      self.raise_badrequest("Ticket %s has not been claimed by user %s" % (ticket_id,sess.user_id))
+
+  # Check if the provider can edit a log entry
+  def check_log_entry_access(self, log_id):
+
+    # Make sure we are actually logged in
+    self.check_auth()
+
+    # Check if the ticket belongs to this user
+    if TicketLogLogic(log_id).check_provider_access(sess.user_id, ('open')) is False:
+      self.raise_badrequest("Log entry %s is not writable by user %s" % (log_id,sess.user_id))
+
+
+
+class ProviderServicesAPI (ProviderAPIBase):
+
+  # List all the tickets (tickets)
+  def GET(self):
     
+    # The user must be logged in
+    self.check_auth()
+
+    # Just list all the services that the provider has access to
+    user_id = sess.user_id
+    qresult = db.query(
+        "select S.name from providers P, services S "
+        "where P.service_id = S.id and user_id = $user_id",
+        vars=locals());
+
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, ['name'])
+
+
+class ProviderServiceTicketsAPI (ProviderAPIBase):
+
+  # List all the tickets (tickets)
+  def GET(self, service_name):
+    
+    # The user must have access to the service name
+    self.check_service_access_by_name(service_name)
+
+    # List all of the tickets that are available under this service
+    user_id = sess.user_id
+    qresult = db.query(
+        "select T.* from tickets T, services S "
+        "where T.service_id = S.id and S.name = $service_name",
+        vars=locals());
+
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, ['id','status'])
+
+class ProviderServiceTicketsAPI (ProviderAPIBase):
+
+  # List all the tickets (tickets)
+  def GET(self, service_name):
+    
+    # The user must have access to the service name
+    self.check_service_access_by_name(service_name)
+
+    # List all of the tickets that are available under this service
+    user_id = sess.user_id
+    qresult = db.query(
+        "select T.* from tickets T, services S "
+        "where T.service_id = S.id and S.name = $service_name",
+        vars=locals());
+
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, ['id','status'])
+
+
+class ProviderServiceClaimsAPI (ProviderAPIBase):
+
+  # List all the claimed tickets for this service
+  def GET(self, service_name):
+
+    # The user must have access to the service name
+    self.check_service_access_by_name(service_name)
+
+    # List all of the tickets that are under this service and claimed by this provider
+    user_id = sess.user_id
+    qresult = db.query(
+        "select C.*, S.name as service_name from claim_history C, tickets T, services S "
+        "where T.service_id = S.id and C.ticket_id = T.id"
+        "  and S.name = $service_name"
+        "  and T.status = 'claimed'"
+        "  and C.provider_id = $user_id",
+        vars=locals());
+
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, ['ticket_id','service_name','provider_code','atime'])
+
+  # Claim the highest priority ticket under this service
+  def POST(self, service_name):
+
+    # The user must have access to the service name
+    self.check_service_access_by_name(service_name)
+
+    # Get the optional provider code
+    provider_code = "default"
+    if 'code' in web.input():
+      provider_code = web.input().code
+
+    # Try to claim the ticket
+    ticket_id = ServiceLogic(service_name).claim_ticket(sess.user_id, provider_code)
+
+    # Communicate what happened to the user
+    if ticket_id is None:
+      self.raise_badrequest("No tickets to claim for service %s" % service_name)
+
+    # Return the claimed ticket ID
+    return ticket_id
+
+
+ 
+class ProviderTicketStatusAPI (ProviderAPIBase):
+
+  # Provide the status of this ticket
+  def GET(self, ticket_id):
+    
+    # The user must be logged in and have access to this ticket
+    self.check_ticket_access(ticket_id)
+
+    # Return the status of this ticket 
+    return db.select("tickets", where="id=$ticket_id", vars=locals())[0].status;
+
+  # Set the status of the ticket
+  def POST(self, ticket_id):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # Get the new desired status
+    new_status = web.input().status
+
+    # Check if the current status is appropriate for the new status
+    if new_status not in ["failed"]:
+      self.raise_badrequest("Cannot set status of ticket to %s" % new_status)
+
+    # Set the status of the ticket in the database
+    db.update("tickets", where="id = $ticket_id", status = new_status, vars=locals())
+
+    # All good!
+    return db.select("tickets", where="id=$ticket_id", vars=locals())[0].status;
+
+
+
+class ProviderTicketFilesAPI (ProviderAPIBase):
+
+  # List all of the files associated with this ticket
+  def GET(self, ticket_id):
+    
+    # In order to list files, we must have claimed this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # List all of the files
+    filedir = self.get_ticket_filedir(ticket_id)
+
+    web.header('Content-Type','text/csv')
+    return directory_as_csv(filedir)
+
+class ProviderTicketFileDownloadAPI (ProviderAPIBase):
+
+  # Download the file
+  def GET(self, ticket_id, file_index):
+
+    # To download files, we must have claimed this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # Get the ticket directory
+    filedir = self.get_ticket_filedir(ticket_id)
+
+    # Get the specified file
+    filename = get_indexed_file(filedir, int(file_index))
+    if filename is None:
+      return self.raise_badrequest("File %s does not exist for ticket %d" % file_index,ticket_id)
+
+    # Serve up the requested file
+    web.header("Content-Disposition", "attachment; filename=\"%s\"" % os.path.basename(filename))
+    web.header("Content-Type", "application/octet-stream")
+    web.header("Content-transfer-encoding","binary")
+    return open(filename, "rb").read()
+
+
+class ProviderTicketLogAPI (ProviderAPIBase):
+
+
+  # Add an error or warning message
+  def POST(self, ticket_id, category):
+
+    # To post to the log, we must have claimed this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # Does the user want the log to be open for adding attachments?
+    keep_open = ("open" in web.input() and int(web.input().open) > 0)
+
+    # Add log entry and get log id
+    return TicketLogic(ticket_id).append_log(category, web.input().message, keep_open)
+
+
+class ProviderTicketLogAttachmentAPI (ProviderAPIBase):
+
+  # Upload an attachment for the log entry
+  def POST(self, log_id):
+
+    # To post to the log, we must have claimed this ticket
+    self.check_log_entry_access(log_id)
+
+    # Get the description
+    if "desc" not in web.input():
+      self.raise_badrequest("Missing attachment description for log entry %d", log_id)
+
+    mime_type = None
+    if "mime_type" in web.input():
+      mime_type = web.input().mime_type
+
+    # Read the input
+    x = web.input(myfile={})
+    
+    # Create an entry for the attachment in the database
+    filepath=x.myfile.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
+    filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
+    (aid, ahash, afile) = TicketLogLogic(log_id).add_attachment(web.input().desc, filename, mime_type)
+
+    # Store the attachment
+    fout = open(afile,'w') # creates the file where the uploaded file should be stored
+    fout.write(x.myfile.file.read()) # writes the uploaded file to the newly created file.
+    fout.close() # closes the file, upload complete.
+
+    # Return the aid
+    return aid
+
+
+class ProviderTicketLogStatusAPI (ProviderAPIBase):
+
+  # Upload an attachment for the log entry
+  def POST(self, log_id):
+
+    # To post to the log, we must have claimed this ticket
+    self.check_log_entry_access(log_id)
+
+    # Get the new status
+    if "status" not in web.input():
+      self.raise_badrequest("Missing status for log entry %d", log_id)
+
+    if web.input().status not in ('closed'):
+      self.raise_badrequest("Invalid status for log entry %d: %s", log_id, web.input().status)
+
+    # Change the status
+    n_updated = TicketLogLogic(log_id).set_status(web.input().status)
+    if n_updated != 1:
+      self.raise_badrequest("Failed to updated status for log entry %d", log_id)
+
+    return "success"
+
+
+
+class ProviderTicketProgressAPI (ProviderAPIBase):
+
+  # Get the progress for a particular chunk
+  def GET(self, ticket_id):
+
+    # To post progress, we must have claimed this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # Return the progress value
+    return TicketLogic(ticket_id).total_progress()
+
+
+  # Set the progress for a particular chunk
+  def POST(self, ticket_id):
+
+    # To post progress, we must have claimed this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # Write the progress 
+    TicketLogic(ticket_id).set_chunk_progress(
+      web.input().chunk_start, web.input().chunk_end, web.input().progress)
+
+    return "success";
+
+
+
+
 
 
 if __name__ == '__main__' :
