@@ -63,28 +63,30 @@ create table ticket_progress
 /* Allowable categories of error messages */
 create type log_category as enum ('info','warning','error');
 
-/* Allowable log entry states */
-create type log_state as enum ('open', 'closed');
-
 /* Log messages for a ticket */
 create table ticket_log
 (
   id serial PRIMARY KEY,
   ticket_id int references tickets(id),
   category log_category not null,
-  state log_state not null default 'closed',
   message text not null,
-  attachments int not null default 0,
   atime timestamp not null default current_timestamp
 );
 
 /* Ticket attachments - images, dump files, etc. */
-create table ticket_log_attachment
+create table ticket_attachment
 (
   id serial PRIMARY KEY,
-  log_id int references ticket_log(id),
+  ticket_id int references tickets(id),
   mime_type text,
   description text,
   uuid text not null
+);
+
+create table ticket_log_attachment
+(
+  log_id int references ticket_log(id),
+  attachment_id int references ticket_attachment(id),
+  PRIMARY KEY (log_id, attachment_id)
 );
 

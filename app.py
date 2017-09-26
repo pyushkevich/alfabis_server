@@ -29,6 +29,7 @@ urls = (
   r"/api/tickets/(\d+)/status", "TicketStatusAPI",
   r"/api/tickets/(\d+)/log", "TicketLogAPI",
   r"/api/tickets/(\d+)/progress", "TicketProgressAPI",
+  r"/api/tickets/(\d+)/queuepos", "TicketQueuePositionAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
@@ -37,6 +38,7 @@ urls = (
   r"/api/pro/tickets/(\d+)/files/(\d+)", "ProviderTicketFileDownloadAPI",
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
+  r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
   r"/api/pro/tickets/logs/(\d+)/attachments", "ProviderTicketLogAttachmentAPI",
   r"/api/pro/tickets/logs/(\d+)/status", "ProviderTicketLogStatusAPI",
   r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI",
@@ -218,22 +220,44 @@ class TicketLogic:
     return len(res) > 0
 
   # Add a message to the ticket log
-  def append_log(self, category, message, keep_open):
-    
-    if keep_open is True:
-      state='open'
-    else:
-      state='closed'
+  def append_log(self, category, message):
 
-    res = db.insert("ticket_log",
-      ticket_id=self.ticket_id, category=category, message=message, state=state)
-    return res
+    log_id = None
+
+    # This requires a transaction
+    with db.transaction():
+
+      # Create a log entry for this ticket
+      log_id = db.insert("ticket_log",
+        ticket_id=self.ticket_id, category=category, message=message)
+
+      # Assign all unfiled attachments to this log message
+      db.query(
+        "insert into ticket_log_attachment "
+        "  select $log_id,A.id from ticket_attachment as A "
+        "    left join ticket_log_attachment as B on A.id = B.attachment_id "
+        "    where ticket_id = $self.ticket_id and B.log_id is null",
+        vars=locals())
+
+    # Find all the unassigned attachments for this ticket
+    return log_id
 
   # Measure the total progress for a ticket
   def total_progress(self):
     res = db.query(
       "select sum((chunk_end-chunk_start) * progress) as x from ticket_progress "
       "where ticket_id=$self.ticket_id", 
+      vars=locals())
+    if len(res) > 0:
+      return res[0].x
+
+  # Measure the total progress for a ticket
+  def queue_position(self):
+    res = db.query(
+      "select count(id) as x from tickets "
+      "where service_id = (select service_id from tickets where id = $self.ticket_id) "
+      "  and status='ready' "
+      "  and id <= $self.ticket_id", 
       vars=locals())
     if len(res) > 0:
       return res[0].x
@@ -252,6 +276,36 @@ class TicketLogic:
           ticket_id=self.ticket_id, chunk_start=chunk_start,
           chunk_end=chunk_end, progress=progress)
 
+  # Create an attachment entry in the database and get ready to upload attachment
+  def add_attachment(self, desc, filename, mime_type = None):
+
+    # Create a new hash for the attachment
+    ahash = uuid.uuid4().hex
+
+    # Check for mime type
+    if mime_type is None:
+      mime_type = guess_mimetype(filename)
+
+    # Insert the entry into log_attachment
+    res = db.insert("ticket_attachment", ticket_id=self.ticket_id, 
+        description=desc, mime_type=mime_type, uuid = ahash)
+
+    # Create the directory for the attachment
+    filedir = '/home/mac/test/datastore/attachments/%08d' % int(self.ticket_id)
+    if not os.path.exists(filedir):
+      os.makedirs(filedir)
+
+    # Create the new filename based on the hash
+    filebase = basename(filename)
+    fullext = filebase[filebase.find('.'):]
+    newname = ahash + fullext;
+
+    # Create the filename where this attachment will be stored
+    afile = filedir +'/'+ newname
+
+    # Return a tuple of dbindex, hash, and filename
+    return (res, ahash, afile)
+
 
 # Logic around ticket log messages. 
 class TicketLogLogic:
@@ -267,14 +321,14 @@ class TicketLogLogic:
       vars=locals())
     return len(res) > 0 and (state_list is None or res[0].state in state_list)
 
-  def check_consumer_access(self, user_id, state_list = None):
+  def check_consumer_access(self, user_id):
 
     res = db.query(
-      "select L.id, L.state from ticket_log L, tickets T "
+      "select L.id from ticket_log L, tickets T "
       "where T.user_id = $user_id and T.id = L.ticket_id and L.id = $self.log_id",
       vars=locals())
 
-    return len(res) > 0 and (state_list is None or res[0].state in state_list)
+    return len(res) > 0
 
   # Create an attachment entry in the database and get ready to upload attachment
   def add_attachment(self, desc, filename, mime_type = None):
@@ -475,7 +529,7 @@ class TicketsAPIBase(AbstractAPI):
     self.check_auth()
 
     # Check if the ticket belongs to this user
-    if TicketLogLogic(log_id).check_consumer_access(sess.user_id, ('closed')) is False:
+    if TicketLogLogic(log_id).check_consumer_access(sess.user_id) is False:
       self.raise_badrequest("Log entry %s is not readable by user %s" % (log_id,sess.user_id))
 
 
@@ -505,7 +559,11 @@ class TicketsAPI (TicketsAPIBase):
 
     # Get the requested service ID
     service_name = web.input().service
-    service_id = db.select("services",where="name=$service_name",vars=locals())[0].id
+
+    res_svc = db.select("services",where="name=$service_name",vars=locals())
+    if len(res_svc) == 0:
+      self.raise_badrequest("Service %s is not available" % service_name)
+    service_id = res_svc[0].id
     ticket_id = db.insert("tickets",user_id=sess.user_id,service_id=service_id,status="init")
     return ticket_id
 
@@ -576,8 +634,17 @@ class TicketLogAPI (TicketsAPIBase):
     # Make sure we have access to this ticket
     self.check_ticket_access(ticket_id)
 
-    # Get all the _closed_ entries from the ticket log (open entries are still being written)
-    qresult = db.select("ticket_log", where="ticket_id=$ticket_id and state='closed'", vars=locals());
+    # Did the user specify a starting date
+    start_id=0
+    if "since" in web.input():
+      start_id=web.input().since
+
+    # Get all the log entries since the last one
+    qresult = db.query(
+        "select L.*,count(B.attachment_id) as attachments "
+        "  from ticket_log L left join ticket_log_attachment B on L.id = B.log_id "
+        "  where ticket_id = $ticket_id and id > $start_id group by L.id,log_id",
+        vars=locals());
 
     web.header('Content-Type','text/csv')
     return query_as_csv(qresult, ['id','atime','category','attachments','message'])
@@ -591,11 +658,17 @@ class TicketLogAttachmentAPI (TicketsAPIBase):
     self.check_log_entry_access(log_id)
 
     # Get the list of all attachments with URLs
-    qresult = db.select("ticket_log_attachment", where="log_id=$log_id", vars=locals());
+    urlbase = web.ctx.home + '/blobs/'
+    qresult = db.query(
+      "select id,description,mime_type,$urlbase || substr(uuid,0,9) as url "
+      "  from ticket_attachment A left join ticket_log_attachment B "
+      "    on A.id = B.attachment_id "
+      "  where B.log_id = $log_id order by id",
+      vars=locals());
 
     # Return as CSV
     web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['description','mime_type','uuid'])
+    return query_as_csv(qresult, ['id','description','mime_type','url'])
 
 
 class TicketProgressAPI (TicketsAPIBase):
@@ -607,6 +680,17 @@ class TicketProgressAPI (TicketsAPIBase):
 
     # Return progres as a string
     return TicketLogic(ticket_id).total_progress()
+      
+
+class TicketQueuePositionAPI (TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_access(ticket_id)
+
+    # Return progres as a string
+    return TicketLogic(ticket_id).queue_position()
       
 
 # Base API for ticket provider classes    
@@ -745,9 +829,10 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
     # Try to claim the ticket
     ticket_id = ServiceLogic(service_name).claim_ticket(sess.user_id, provider_code)
 
-    # Communicate what happened to the user
+    # If there is no ticket to claim, we return 0, this is more meaningful than
+    # a bad request header
     if ticket_id is None:
-      self.raise_badrequest("No tickets to claim for service %s" % service_name)
+      return -1;
 
     # Return the claimed ticket ID
     return ticket_id
@@ -823,8 +908,9 @@ class ProviderTicketFileDownloadAPI (ProviderAPIBase):
     return open(filename, "rb").read()
 
 
+# Creates a log message. All the 'free' attachments associated with the ticket 
+# will be associated with the current log message
 class ProviderTicketLogAPI (ProviderAPIBase):
-
 
   # Add an error or warning message
   def POST(self, ticket_id, category):
@@ -832,25 +918,24 @@ class ProviderTicketLogAPI (ProviderAPIBase):
     # To post to the log, we must have claimed this ticket
     self.check_ticket_claimed(ticket_id)
 
-    # Does the user want the log to be open for adding attachments?
-    keep_open = ("open" in web.input() and int(web.input().open) > 0)
-
     # Add log entry and get log id
-    return TicketLogic(ticket_id).append_log(category, web.input().message, keep_open)
+    return TicketLogic(ticket_id).append_log(category, web.input().message)
 
 
-class ProviderTicketLogAttachmentAPI (ProviderAPIBase):
+# This class handles associating attachments with ticket.
+class ProviderTicketAttachmentAPI (ProviderAPIBase):
 
-  # Upload an attachment for the log entry
-  def POST(self, log_id):
+  # Upload an attachment for a ticket
+  def POST(self, ticket_id):
 
     # To post to the log, we must have claimed this ticket
-    self.check_log_entry_access(log_id)
+    self.check_ticket_claimed(ticket_id)
 
     # Get the description
     if "desc" not in web.input():
       self.raise_badrequest("Missing attachment description for log entry %d", log_id)
 
+    # Mime type is optional
     mime_type = None
     if "mime_type" in web.input():
       mime_type = web.input().mime_type
@@ -859,9 +944,10 @@ class ProviderTicketLogAttachmentAPI (ProviderAPIBase):
     x = web.input(myfile={})
     
     # Create an entry for the attachment in the database
-    filepath=x.myfile.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
-    filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
-    (aid, ahash, afile) = TicketLogLogic(log_id).add_attachment(web.input().desc, filename, mime_type)
+    filepath=x.myfile.filename.replace('\\','/') 
+    filename=filepath.split('/')[-1] 
+    tlogic = TicketLogic(ticket_id)
+    (aid, ahash, afile) = tlogic.add_attachment(web.input().desc, filename, mime_type)
 
     # Store the attachment
     fout = open(afile,'w') # creates the file where the uploaded file should be stored
@@ -930,7 +1016,7 @@ class DirectDownloadAPI (AbstractAPI):
 
     # Find the blob in log attachments
     pattern = hashstr + '%'
-    res = db.select("ticket_log_attachment", where="uuid like $pattern", vars=locals());
+    res = db.select("ticket_attachment", where="uuid like $pattern", vars=locals());
 
     # Did we find a blob?
     if len(res) == 0:
@@ -940,7 +1026,7 @@ class DirectDownloadAPI (AbstractAPI):
     row = res[0]
 
     # The directory of the file
-    filedir = '/home/mac/test/datastore/logdata/%08d' % int(row.log_id)
+    filedir = '/home/mac/test/datastore/attachments/%08d' % int(row.ticket_id)
 
     # Find the file in the directory
     for file in os.listdir(filedir):
