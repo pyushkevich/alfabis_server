@@ -39,8 +39,6 @@ urls = (
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
-  r"/api/pro/tickets/logs/(\d+)/attachments", "ProviderTicketLogAttachmentAPI",
-  r"/api/pro/tickets/logs/(\d+)/status", "ProviderTicketLogStatusAPI",
   r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI",
   r"/blobs/([a-f0-9]{8})", "DirectDownloadAPI",
   r"/blobs/([a-f0-9]{32})", "DirectDownloadAPI"
@@ -860,7 +858,7 @@ class ProviderTicketStatusAPI (ProviderAPIBase):
     new_status = web.input().status
 
     # Check if the current status is appropriate for the new status
-    if new_status not in ["failed"]:
+    if new_status not in ["failed", "success"]:
       self.raise_badrequest("Cannot set status of ticket to %s" % new_status)
 
     # Set the status of the ticket in the database
@@ -956,30 +954,6 @@ class ProviderTicketAttachmentAPI (ProviderAPIBase):
 
     # Return the aid
     return aid
-
-
-class ProviderTicketLogStatusAPI (ProviderAPIBase):
-
-  # Upload an attachment for the log entry
-  def POST(self, log_id):
-
-    # To post to the log, we must have claimed this ticket
-    self.check_log_entry_access(log_id)
-
-    # Get the new status
-    if "status" not in web.input():
-      self.raise_badrequest("Missing status for log entry %d", log_id)
-
-    if web.input().status not in ('closed'):
-      self.raise_badrequest("Invalid status for log entry %d: %s", log_id, web.input().status)
-
-    # Change the status
-    n_updated = TicketLogLogic(log_id).set_status(web.input().status)
-    if n_updated != 1:
-      self.raise_badrequest("Failed to updated status for log entry %d", log_id)
-
-    return "success"
-
 
 
 class ProviderTicketProgressAPI (ProviderAPIBase):
