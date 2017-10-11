@@ -14,7 +14,7 @@ from os import walk;
 from os.path import basename;
 
 # Needed for session support
-web.config.debug = False
+web.config.debug = True
 
 # URL mapping
 urls = (
@@ -50,10 +50,12 @@ app = web.application(urls, globals())
 
 # Connect to the database
 db = web.database(
-        host=os.environ['POSTGRES_PORT_5432_TCP_ADDR'],
-        port=os.environ['POSTGRES_PORT_5432_TCP_PORT'],
-        dbn='postgres', db='alfabis_test', 
-        user='postgres', pw='postgres')
+  host=os.environ['POSTGRES_PORT_5432_TCP_ADDR'],
+  port=os.environ['POSTGRES_PORT_5432_TCP_PORT'],
+  dbn='postgres', 
+  db=os.environ['ALFABIS_DATABASE_NAME'],
+  user=os.environ['ALFABIS_DATABASE_USERNAME'],
+  pw=os.environ['ALFABIS_DATABASE_PASSWORD'])
 
 # Create the session object with database storate
 sess = web.session.Session(
@@ -62,7 +64,7 @@ sess = web.session.Session(
 
 # Configure the template renderer with session support
 render = web.template.render(
-    '/home/mac/test/temp/', 
+    'temp/', 
     globals={'markdown': markdown.markdown, 'session': sess}, 
     cache=False);
 
@@ -277,7 +279,7 @@ class TicketLogic:
 
   # Get the file directory for given area
   def get_filedir(self, area):
-    filedir = '/home/mac/test/datastore/tickets/%08d/%s' % (int(self.ticket_id), area)
+    filedir = 'datastore/tickets/%08d/%s' % (int(self.ticket_id), area)
     if not os.path.exists(filedir):
       os.makedirs(filedir)
     return filedir
@@ -337,7 +339,7 @@ class TicketLogic:
         description=desc, mime_type=mime_type, uuid = ahash)
 
     # Create the directory for the attachment
-    filedir = '/home/mac/test/datastore/attachments/%08d' % int(self.ticket_id)
+    filedir = 'datastore/attachments/%08d' % int(self.ticket_id)
     if not os.path.exists(filedir):
       os.makedirs(filedir)
 
@@ -402,7 +404,7 @@ class TicketLogLogic:
       db.update("ticket_log", where="id = $self.log_id", attachments=res2[0].count, vars=locals())
 
     # Create the directory for the output
-    filedir = '/home/mac/test/datastore/logdata/%08d' % int(self.log_id)
+    filedir = 'datastore/logdata/%08d' % int(self.log_id)
     if not os.path.exists(filedir):
       os.makedirs(filedir)
 
@@ -1063,7 +1065,7 @@ class DirectDownloadAPI (AbstractAPI):
     row = res[0]
 
     # The directory of the file
-    filedir = '/home/mac/test/datastore/attachments/%08d' % int(row.ticket_id)
+    filedir = 'datastore/attachments/%08d' % int(row.ticket_id)
 
     # Find the file in the directory
     for file in os.listdir(filedir):
