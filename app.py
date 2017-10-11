@@ -25,7 +25,8 @@ urls = (
   r"/api/login", "LoginAPI",
   r"/api/services", "ServicesAPI",
   r"/api/tickets", "TicketsAPI",
-  r"/api/tickets/(\d+)/files", "TicketFilesAPI",
+  r"/api/tickets/(\d+)/files/(input|results)", "TicketFilesAPI",
+  r"/api/tickets/(\d+)/files/(input|results)/(\d+)", "TicketFileDownloadAPI",
   r"/api/tickets/(\d+)/status", "TicketStatusAPI",
   r"/api/tickets/(\d+)/log", "TicketLogAPI",
   r"/api/tickets/(\d+)/progress", "TicketProgressAPI",
@@ -34,8 +35,8 @@ urls = (
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
   r"/api/pro/services/([\w\-]+)/claims", "ProviderServiceClaimsAPI",
-  r"/api/pro/tickets/(\d+)/files", "ProviderTicketFilesAPI",
-  r"/api/pro/tickets/(\d+)/files/(\d+)", "ProviderTicketFileDownloadAPI",
+  r"/api/pro/tickets/(\d+)/files/(input|results)", "ProviderTicketFilesAPI",
+  r"/api/pro/tickets/(\d+)/files/(input|results)/(\d+)", "ProviderTicketFileDownloadAPI",
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
@@ -274,6 +275,53 @@ class TicketLogic:
           ticket_id=self.ticket_id, chunk_start=chunk_start,
           chunk_end=chunk_end, progress=progress)
 
+  # Get the file directory for given area
+  def get_filedir(self, area):
+    filedir = '/home/mac/test/datastore/tickets/%08d/%s' % (int(self.ticket_id), area)
+    if not os.path.exists(filedir):
+      os.makedirs(filedir)
+    return filedir
+
+  # List all the files associated with ticket in a given area
+  def list_files(self, area):
+
+    # List all of the files
+    filedir = self.get_filedir(area)
+
+    # Send the directory contents as CSV
+    return directory_as_csv(filedir)
+
+  # Receive uploaded files associated with a ticket and area
+  def receive_file(self, area, fileobj):
+
+    # Get the directory to store this in
+    filedir = self.get_filedir(area)
+    filepath=fileobj.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
+    filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
+    
+    fout = open(filedir +'/'+ filename,'w') # creates the file where the uploaded file should be stored
+    fout.write(fileobj.file.read()) # writes the uploaded file to the newly created file.
+    fout.close() # closes the file, upload complete.
+
+    # Return the local path to file
+    return filename
+
+  # Serve file from given area
+  def get_nth_file(self, area, file_index):
+
+    # Get the ticket directory
+    filedir = self.get_filedir(area)
+
+    # Get the specified file
+    filename = get_indexed_file(filedir, int(file_index))
+    if filename is None:
+      return self.raise_badrequest("File %s does not exist for ticket %d" % file_index,self.ticket_id)
+
+    return filename
+
+
+
+
   # Create an attachment entry in the database and get ready to upload attachment
   def add_attachment(self, desc, filename, mime_type = None):
 
@@ -453,13 +501,6 @@ def get_indexed_file(dir_path, index):
 
 class AbstractAPI:
 
-  # The the file directory for a given ticket
-  def get_ticket_filedir(self, ticket_id):
-    filedir = '/home/mac/test/datastore/tickets/%08d' % int(ticket_id)
-    if not os.path.exists(filedir):
-      os.makedirs(filedir)
-    return filedir
-
   # Check if the user is authorized to be here
   def check_auth(self):
     if sess.loggedin is False:
@@ -530,6 +571,12 @@ class TicketsAPIBase(AbstractAPI):
     if TicketLogLogic(log_id).check_consumer_access(sess.user_id) is False:
       self.raise_badrequest("Log entry %s is not readable by user %s" % (log_id,sess.user_id))
 
+  # Check ticket area for being allowed
+  def check_file_area(self, area):
+    if area not in ("input","result"):
+      self.raise_badrequest("Invalid file area %s requested" % area)
+
+
 
 class TicketsAPI (TicketsAPIBase):
 
@@ -568,36 +615,45 @@ class TicketsAPI (TicketsAPIBase):
 
 class TicketFilesAPI (TicketsAPIBase):
 
-  def GET(self, ticket_id):
+  def GET(self, ticket_id, area):
 
     # Make sure we have access to this ticket
     self.check_ticket_access(ticket_id)
-    
-    filedir = self.get_ticket_filedir(ticket_id)
-    web.header('Content-Type','text/csv')
-    return directory_as_csv(filedir)
 
-  def POST(self, ticket_id):
+    # Send the directory contents as CSV
+    csv = TicketLogic(ticket_id).list_files(area)
+    web.header('Content-Type','text/csv')
+    return csv
+
+  def POST(self, ticket_id, area):
 
     # Make sure we have access to this ticket
     self.check_ticket_access(ticket_id, ['init'])
 
     # Data directory
     x = web.input(myfile={})
-    print x.keys()
-    # if 'file' in x.myfile and 'filename' in x.myfile:
     try:
-      filedir = self.get_ticket_filedir(ticket_id)
-      filepath=x.myfile.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
-      filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
-
-      fout = open(filedir +'/'+ filename,'w') # creates the file where the uploaded file should be stored
-      fout.write(x.myfile.file.read()) # writes the uploaded file to the newly created file.
-      fout.close() # closes the file, upload complete.
+      TicketLogic(ticket_id).receive_file(area, x.myfile)
       return "success"
 
     except:
       raise web.badrequest()
+
+
+class TicketFileDownloadAPI (TicketsAPIBase):
+
+  # Download the file
+  def GET(self, ticket_id, area, file_index):
+
+    # To download files, we must have claimed this ticket
+    self.check_ticket_access(ticket_id)
+
+    # Serve up the requested file
+    filename = TicketLogic(ticket_id).get_nth_file(area, file_index)
+    web.header("Content-Disposition", "attachment; filename=\"%s\"" % os.path.basename(filename))
+    web.header("Content-Type", "application/octet-stream")
+    web.header("Content-transfer-encoding","binary")
+    return open(filename, "rb").read()
 
 
 class TicketStatusAPI (TicketsAPIBase):
@@ -872,34 +928,41 @@ class ProviderTicketStatusAPI (ProviderAPIBase):
 class ProviderTicketFilesAPI (ProviderAPIBase):
 
   # List all of the files associated with this ticket
-  def GET(self, ticket_id):
+  def GET(self, ticket_id, area):
     
     # In order to list files, we must have claimed this ticket
     self.check_ticket_claimed(ticket_id)
 
-    # List all of the files
-    filedir = self.get_ticket_filedir(ticket_id)
-
+    # Return listing as CSV
+    csv = TicketLogic(ticket_id).list_files(area)
     web.header('Content-Type','text/csv')
-    return directory_as_csv(filedir)
+    return csv
+
+  def POST(self, ticket_id, area):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    # Get the form parameters and store file
+    x = web.input(myfile={})
+    try:
+      TicketLogic(ticket_id).receive_file(area, x.myfile)
+      return "success"
+
+    except:
+      raise web.badrequest()
+
 
 class ProviderTicketFileDownloadAPI (ProviderAPIBase):
 
   # Download the file
-  def GET(self, ticket_id, file_index):
+  def GET(self, ticket_id, area, file_index):
 
     # To download files, we must have claimed this ticket
     self.check_ticket_claimed(ticket_id)
 
-    # Get the ticket directory
-    filedir = self.get_ticket_filedir(ticket_id)
-
-    # Get the specified file
-    filename = get_indexed_file(filedir, int(file_index))
-    if filename is None:
-      return self.raise_badrequest("File %s does not exist for ticket %d" % file_index,ticket_id)
-
     # Serve up the requested file
+    filename = TicketLogic(ticket_id).get_nth_file(area, file_index)
     web.header("Content-Disposition", "attachment; filename=\"%s\"" % os.path.basename(filename))
     web.header("Content-Type", "application/octet-stream")
     web.header("Content-transfer-encoding","binary")
