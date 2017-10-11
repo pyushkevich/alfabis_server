@@ -14,7 +14,7 @@ from os import walk;
 from os.path import basename;
 
 # Needed for session support
-web.config.debug = True
+web.config.debug = False
 
 # URL mapping
 urls = (
