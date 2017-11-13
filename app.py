@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 import web,sys
 import markdown
 import json
@@ -9,9 +9,17 @@ import StringIO
 import glob
 import uuid
 import mimetypes
-from pprint import pprint;
-from os import walk;
-from os.path import basename;
+import httplib2
+from pprint import pprint
+from os import walk
+from os.path import basename
+from oauth2client import client
+from apiclient.discovery import build
+from web.wsgiserver import CherryPyWSGIServer
+
+# Enable SSL support
+CherryPyWSGIServer.ssl_certificate = os.environ['ALFABIS_SSL_CERT']
+CherryPyWSGIServer.ssl_private_key = os.environ['ALFABIS_SSL_KEY']
 
 # Needed for session support
 web.config.debug = False
@@ -19,10 +27,11 @@ web.config.debug = False
 # URL mapping
 urls = (
   r'/', 'index',
-  r"/login", "LoginPage",
-  r"/register", "RegisterPage",
+  r"/token", "TokenRequest",
   r"/logout", "LogoutPage",
+  r"/services", "ServicesPage",
   r"/api/login", "LoginAPI",
+  r"/api/oauth2cb", "OAuthCallbackAPI",
   r"/api/services", "ServicesAPI",
   r"/api/tickets", "TicketsAPI",
   r"/api/tickets/(\d+)/files/(input|results)", "TicketFilesAPI",
@@ -69,7 +78,9 @@ render = web.template.render(
     cache=False);
 
 # Configure the markdown to HTML converter (do we need this really? Why not HTML5?)
-md = markdown.Markdown(output_format='html4')
+md = markdown.Markdown(output_format='html4',
+    extensions = ['markdown.extensions.meta',
+                  'markdown.extensions.tables'])
 
 # A function to render a markdown template with parameters
 def render_markdown(page, *args):
@@ -88,100 +99,62 @@ def guess_mimetype(filename):
   return mime_type
 
 
-# A class that handles authentication. When initialized, it tried to authenticate
-# and stores the result of the authentication in its state. It can also be used 
-# for more advanced queries about the user
-class Authentication:
+# This class facilitates working with the Google OAuth2 API
+class OAuthHelper:
 
-  def __init__(self, email, passwd):
-    self.email,self.passwd = email.strip().lower(),passwd
-    passhash = hashlib.sha1("sAlT754-"+passwd).hexdigest()
-    try:
-      self.ident = db.select('users', where='email=$email', vars=locals())[0]
-      if passhash == self.ident['passwd']:
-        self.status = 0;                  # successful login
-      else:
-        self.status = 1;                  # wrong password
-    except:
-      self.status = 2;                    # unknown user or other issue
+  def __init__(self):
 
-  def success(self):
-    return (self.status == 0);
+    self.flow = client.flow_from_clientsecrets(
+        os.environ['ALFABIS_GOOGLE_CLIENTSECRET'],
+        scope='https://www.googleapis.com/auth/userinfo.email',
+        redirect_uri=web.ctx.home+"/api/oauth2cb")
 
-  def error_message(self):
-    if self.status == 1:
-      return "Your email and password do not match"
-    elif self.status == 2:
-      return "Your email is not in our system"
-    else:
-      return None
+  def auth_url(self):
+    return self.flow.step1_get_authorize_url()
 
-  def user_id(self):
-    if self.status == 0:
-      return self.ident['id']
-    else:
-      return None
+  def authorize(self, auth_code):
 
-  def dispname(self):
-    if self.status == 0:
-      return self.ident['dispname']
-    else:
-      return None
+    # Obtain credentials from the auth code
+    self.credentials = self.flow.step2_exchange(auth_code)
 
+    # Get use information from Google
+    self.http_auth = self.credentials.authorize(httplib2.Http())
+    user_info_service = build('oauth2','v2',http=self.http_auth)
+    user_info = user_info_service.userinfo().get().execute()
 
+    return user_info
+
+# Home Page handler
 class index:
   def GET(self):
-    return render_markdown("hohum", False, None)
 
-class LoginPage:
+    # Create the URL for authorization
+    auth_url=None
+    if sess.loggedin == False:
+      auth_url = OAuthHelper().auth_url()
 
-  def POST(self):
+    # The redirect URL for after authentication
+    sess.return_uri=web.ctx.home
+    return render_markdown("hohum", False, None, auth_url)
 
-    # Get the email and password of the user
-    email, passwd = web.input().name, web.input().passwd
-
-    # Are we trying to register?
-    if "signin" in web.input():
-
-      # Check user against database
-      auth = Authentication(email, passwd)
-      if auth.success():
-        sess.loggedin = True
-        sess.email = email
-        sess.user_id = auth.user_id()
-        sess.dispname = auth.dispname()
-        raise web.seeother('/')
-      else:
-        return render_markdown("hohum", False, auth.error_message())
-
-    else:
-
-      # Redirect to the registration page
-      sess.email = email;
-      raise web.seeother('/register')
-
-class RegisterPage:
+# Token request handler
+class TokenRequest:
 
   def GET(self):
-    return render_markdown("register", sess.email);
 
-  def POST(self):
+    # Create the URL for authorization
+    auth_url=None
+    token=None
+    if sess.loggedin == False:
+      auth_url = OAuthHelper().auth_url()
+    else:
+      email = sess.email
+      res = db.select('users', where="email=$email", vars=locals())
+      token=res[0].passwd
 
-    # Get the email and password of the user
-    email_raw, fullname, passwd = web.input().email, web.input().fullname, web.input().passwd
-
-    email = email_raw.strip().lower()
-    passhash = hashlib.sha1("sAlT754-"+passwd).hexdigest()
-
-    # Insert into the database
-    res = db.select('users', where="email=$email", vars=locals())
-    if len(res) > 0:
-      return render_markdown("register", email, fullname, "This email is already registered")
-
-    db.insert('users', email=email,passwd=passhash,dispname=fullname)
-    sess.loggedin = True;
-    sess.email = email;
-    raise web.seeother('/')
+    # The redirect URL for after authentication
+    sess.return_uri=web.ctx.home + "/token"
+    return render_markdown("token", auth_url, token)
 
 
 class LogoutPage:
@@ -189,6 +162,19 @@ class LogoutPage:
   def GET(self):
     sess.kill()
     raise web.seeother('/')
+
+class ServicesPage:
+
+  def GET(self):
+    
+    if sess.loggedin is not True:
+      raise web.redirect("/")
+
+    services=db.select("services")
+    return render_markdown("services_home", services)
+
+
+
 
 
 # ======================
@@ -516,27 +502,60 @@ class AbstractAPI:
   def raise_badrequest(self, message = "bad request"):
     raise web.HTTPError("400 bad request", {}, message)
 
+class OAuthCallbackAPI:
+  
+  def GET(self):
+
+    # Get the code from callback
+    auth_code = web.input().code
+
+    # Authorize via code
+    user_info = OAuthHelper().authorize(auth_code)
+
+    # Get the email
+    email = user_info.get("email")
+    alfabis_id=None
+
+    # Create an account for the user with credential information
+    res = db.select('users', where="email=$email", vars=locals())
+    if len(res) > 0:
+      alfabis_id=res[0].id
+    else:
+      passwd=os.urandom(24).encode('hex')
+      db.insert('users', email=email, passwd=passwd, dispname=user_info.get("name"))
+
+    # Set the user information in the session
+    sess.email = user_info.get('email')
+    sess.name = user_info.get('name')
+    sess.user_id = alfabis_id
+    sess.loggedin = True
+
+    # Redirect to the home page
+    raise web.redirect(sess.return_uri)
+    
+
 class LoginAPI:
 
   def POST(self):
 
     # Get the email and password of the user
-    pprint(web.input())
-    try:
-      email, passwd = web.input().email, web.input().passwd
-      auth = Authentication(email, passwd)
+    # try:
+    token = web.input().token
+    res = db.select('users', where='passwd=$token', vars=locals())
 
-      if auth.success():
-        sess.loggedin = True
-        sess.email = email
-        sess.user_id = auth.user_id()
-        return "success";
+    if len(res) > 0:
+      user_data = res[0];
+      sess.loggedin = True
+      sess.user_id = user_data.id
+      sess.email = user_data.email
+      return ("logged in as %s" % sess.email);
 
-      else:
-        sess.kill();
-        return "error: %s" % auth.error_message();
-    except:
-      raise web.badrequest()
+    else:
+      sess.kill();
+      raise web.unauthorized()
+
+    #except:
+    #  raise web.badrequest()
 
 class ServicesAPI (AbstractAPI):
 

@@ -1,28 +1,16 @@
-$def with(signed_in, log_message=None)
+$def with(signed_in, log_message=None, auth_url=None)
+Title: Alfabis Server
 
 
 Alfabis Server 1.0 
 =====
-ALFABIS is a web-based application for medical image automated processing. You can upload images using a web-based API or directly through the website, request a certain kind of processing, and service providers will generate automated processing results. It's easy and lightweight.
+ALFABIS is a web-based framework for connecting developers of medical image analysis algorithms to their users. Users send images to the server, and algorithm providers download these images, process them, and upload the results for users to retrieve. 
 
 $if session.loggedin == False:
-  <form class="pure-form" action="/login" method="POST">
-      <fieldset>
-          <legend>Sign in or register for ALFABIS</legend>
+  * [Login with Google]($(auth_url))
 
-          <input type="email" placeholder="Email" name="name">
-          <input type="password" placeholder="Password" name="passwd">
+$else:
+  Welcome, **$(session.email)**
 
-          <label for="remember">
-              <input id="remember" type="checkbox"> Remember me
-          </label>
-
-          &nbsp
-          &nbsp
-
-          <button type="submit" name="signin" class="pure-button pure-button-primary">Sign in</button>
-          <button type="submit" name="register" class="pure-button">Register</button>
-      </fieldset>
-  </form>
 $if log_message:
   <div style="color:red">$(log_message)</div>
