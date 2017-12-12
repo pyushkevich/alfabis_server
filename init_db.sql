@@ -21,6 +21,7 @@ create table services
 
 /* Create an example service */
 insert into services (name,shortdesc) values ('ASHS-PMC','Hippocampal subfield segmentation in 3 Tesla T2w-MRI');
+insert into services (name,shortdesc) values ('PICSL-HarP','Hippocampus segmentation with HarP protocol in 3 Tesla T1w-MRI');
 
 create type ticket_status as enum ('init','ready','claimed','success','failed','timeout');
 

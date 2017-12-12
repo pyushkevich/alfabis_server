@@ -20,6 +20,7 @@ from web.wsgiserver import CherryPyWSGIServer
 # Enable SSL support
 CherryPyWSGIServer.ssl_certificate = os.environ['ALFABIS_SSL_CERT']
 CherryPyWSGIServer.ssl_private_key = os.environ['ALFABIS_SSL_KEY']
+CherryPyWSGIServer.ssl_certificate_chain = os.environ['ALFABIS_SSL_FULLCHAIN']
 
 # Needed for session support
 web.config.debug = False
@@ -28,6 +29,7 @@ web.config.debug = False
 urls = (
   r'/', 'index',
   r"/token", "TokenRequest",
+  r"/acceptterms", "AcceptTermsRequest",
   r"/logout", "LogoutPage",
   r"/services", "ServicesPage",
   r"/api/login", "LoginAPI",
@@ -69,7 +71,7 @@ db = web.database(
 # Create the session object with database storate
 sess = web.session.Session(
     app, web.session.DBStore(db, 'sessions'), 
-    initializer={'loggedin': False})
+    initializer={'loggedin': False, 'acceptterms': False})
 
 # Configure the template renderer with session support
 render = web.template.render(
@@ -137,6 +139,17 @@ class index:
     sess.return_uri=web.ctx.home
     return render_markdown("hohum", False, None, auth_url)
 
+# Handler for accepting terms of service
+class AcceptTermsRequest:
+  def POST(self):
+    cb=web.input().cb
+    if cb == 'on':
+      sess.acceptterms = True
+      raise web.redirect("/token")
+    else:
+      sess.acceptterms = False
+      raise web.redirect("/logout")
+
 # Token request handler
 class TokenRequest:
 
@@ -152,7 +165,7 @@ class TokenRequest:
       res = db.select('users', where="email=$email", vars=locals())
       token=res[0].passwd
 
-    # The redirect URL for after authentication
+    # Get the user to accept the terms of service
     sess.return_uri=web.ctx.home + "/token"
     return render_markdown("token", auth_url, token)
 
