@@ -16,6 +16,7 @@ from os.path import basename
 from oauth2client import client
 from apiclient.discovery import build
 from web.wsgiserver import CherryPyWSGIServer
+from git import Repo
 
 # Enable SSL support
 CherryPyWSGIServer.ssl_certificate = os.environ['ALFABIS_SSL_CERT']
@@ -35,6 +36,7 @@ urls = (
   r"/api/login", "LoginAPI",
   r"/api/oauth2cb", "OAuthCallbackAPI",
   r"/api/services", "ServicesAPI",
+  r"/api/services/([a-f0-9]+)/detail", "ServicesDetailAPI",
   r"/api/tickets", "TicketsAPI",
   r"/api/tickets/(\d+)/files/(input|results)", "TicketFilesAPI",
   r"/api/tickets/(\d+)/files/(input|results)/(\d+)", "TicketFileDownloadAPI",
@@ -45,13 +47,16 @@ urls = (
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
-  r"/api/pro/services/([\w\-]+)/claims", "ProviderServiceClaimsAPI",
+  r"/api/pro/services/([a-f0-9]+)/claims", "ProviderServiceClaimsAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)", "ProviderTicketFilesAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)/(\d+)", "ProviderTicketFileDownloadAPI",
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
   r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI",
+  r"/api/admin/catalog","AdminCatalogAPI", 
+  r"/api/admin/catalog/rebuild","AdminCatalogRebuildAPI", 
+  r"/api/admin/providers/([\w\-]+)/users","AdminProviderUsersAPI", 
   r"/blobs/([a-f0-9]{8})", "DirectDownloadAPI",
   r"/blobs/([a-f0-9]{32})", "DirectDownloadAPI"
   )
@@ -187,9 +192,6 @@ class ServicesPage:
     return render_markdown("services_home", services)
 
 
-
-
-
 # ======================
 # Business Logic classes
 # ======================
@@ -213,9 +215,9 @@ class TicketLogic:
     return len(res) > 0 and (status_list is None or res[0].status in status_list)
 
   # Check that the specified provider has actually claimed this ticket 
-  def check_provider_claimed(self, provider_id):
+  def check_provider_claimed(self, user_id):
     res = db.select("claim_history", 
-      where="ticket_id=$self.ticket_id and provider_id=$provider_id",
+      where="ticket_id=$self.ticket_id and puser_id=$user_id",
       vars=locals());
     return len(res) > 0
 
@@ -255,7 +257,7 @@ class TicketLogic:
   def queue_position(self):
     res = db.query(
       "select count(id) as x from tickets "
-      "where service_id = (select service_id from tickets where id = $self.ticket_id) "
+      "where service_githash = (select service_githash from tickets where id = $self.ticket_id) "
       "  and status='ready' "
       "  and id <= $self.ticket_id", 
       vars=locals())
@@ -361,12 +363,16 @@ class TicketLogLogic:
     self.log_id = log_id
 
   def check_provider_access(self, provider_id, state_list = None):
-    res = db.query(
-      "select L.id, L.state from ticket_log L, tickets T, providers P "
-      "where T.service_id = P.service_id and P.user_id = $provider_id "
-      "  and T.id = L.ticket_id and L.id = $self.log_id",
-      vars=locals())
-    return len(res) > 0 and (state_list is None or res[0].state in state_list)
+    # Get the ticket id
+    res = db.select('ticket_log',where="id=$self.log_id")
+    if len(res) != 1:
+      raise_badrequest('Invalid log id')
+    
+    # Check access to the the ticket
+    TicketLogic(res[0].ticket_id).check_provider_access(provider_id)
+
+    # Check the states
+    return (state_list is None or res[0].state in state_list)
 
   def check_consumer_access(self, user_id):
 
@@ -424,25 +430,71 @@ class TicketLogLogic:
     return db.update("ticket_log", where="id = $self.log_id", state = status, vars=locals())
 
 
+# Logic around the service/provider catalog
+class CatalogLogic:
+  
+  def rebuild(self):
 
+    # Scan the catalog directory for all providers
+    rcat = Repo('catalog')
+    if rcat.bare is True:
+      raise web.badrequest()
 
+    # Clear the database of provider and service tables
+    db.delete('provider_services', where='service_githash is not null')
+    db.delete('services', where='name is not null')
+    db.delete('providers', where='name is not null')
 
+    for pro in rcat.submodules:
+      if pro.name.startswith('providers/'):
+
+        # Get the name of the provider
+        pname = os.path.basename(pro.name)
+
+        # Add the provider to the database
+        db.insert('providers', name=pname)
+
+        # Run over all the available services
+        for q in pro.children():
+          try:
+            f_json = open(os.path.join(q.abspath,'service.json'))
+            j = json.load(f_json)
+            f_json.close()
+
+            with db.transaction():
+
+              # Insert the actual service
+              db.insert('services',
+                        name = j['name'], 
+                        githash = q.hexsha,
+                        version = j['version'], 
+                        shortdesc = j['shortdesc'],
+                        json = json.dumps(j))
+
+              # Assign the service to the provider
+              db.insert('provider_services',
+                        provider_name = pname,
+                        service_githash = q.hexsha)
+          except:
+            print("Unexpected error:", sys.exc_info())
+        
 
 # Logic around services. This class is initialized with a service ID
 class ServiceLogic:
 
-  def __init__(self, service_name):
-    self.service_name = service_name
+  def __init__(self, service_githash):
+    self.service_githash = service_githash
 
-  def check_provider_access(self, provider_id):
+  def check_provider_access(self, user_id):
     res = db.query(
-      "select * from providers P, services S "
-      "where P.service_id = S.id and S.name=$self.service_name "
-      "  and user_id = $provider_id",
+      "select * from provider_access PA, provider_services PS "
+      "where PS.service_githash=$self.service_githash "
+      "  and PS.provider_name = PA.provider"
+      "  and user_id = $user_id",
       vars=locals());
     return len(res) > 0
 
-  def claim_ticket(self, provider_id, provider_code):
+  def claim_ticket(self, user_id, provider_name, provider_code):
 
     # Create a transaction because this operation must be atomic
     with db.transaction():
@@ -451,9 +503,8 @@ class ServiceLogic:
       # on the ticket serial number, but this will need to be updated to use an actual
       # prioritization system in the future
       res = db.query(
-          "select T.id from tickets T, services S, providers P "
-          "where T.service_id = S.id and P.service_id = S.id "
-          "  and P.user_id = $provider_id and S.name = $self.service_name "
+          "select T.id from tickets T "
+          "where T.service_githash = $self.service_githash "
           "  and T.status = 'ready' "
           "order by T.id asc limit 1", vars=locals());
 
@@ -465,7 +516,11 @@ class ServiceLogic:
       ticket_id = res[0].id
 
       # Make an entry in the claims table, to keep track of this claim
-      db.insert("claim_history", ticket_id=ticket_id, provider_id=provider_id, provider_code=provider_code)
+      db.insert("claim_history", 
+                ticket_id=ticket_id, 
+                provider=provider_name, 
+                provider_code=provider_code,
+                puser_id=user_id)
 
       # Mark the ticket as claimed
       db.update("tickets", where="id = $ticket_id", status = "claimed", vars=locals())
@@ -500,7 +555,7 @@ def get_indexed_file(dir_path, index):
     return files[index]
 
 
-class AbstractAPI:
+class AbstractAPI(object):
 
   # Check if the user is authorized to be here
   def check_auth(self):
@@ -561,7 +616,7 @@ class LoginAPI:
       sess.loggedin = True
       sess.user_id = user_data.id
       sess.email = user_data.email
-      return ("logged in as %s" % sess.email);
+      return ("logged in as %s \n" % sess.email);
 
     else:
       sess.kill();
@@ -578,7 +633,21 @@ class ServicesAPI (AbstractAPI):
 
     qresult = db.select("services");
     web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['name','shortdesc'])
+    return query_as_csv(qresult, ['name','githash','version','shortdesc'])
+
+
+class ServicesDetailAPI (AbstractAPI):
+
+  def GET(self, githash):
+    
+    self.check_auth()
+
+    qresult = db.select("services", where="githash=$githash",vars=locals())
+    if len(qresult) == 0:
+      self.raise_badrequest("Service %s is not available" % githash)
+    json = qresult[0].json
+    web.header('Content-Type','application/json')
+    return json
 
 
 class TicketsAPIBase(AbstractAPI):
@@ -624,7 +693,7 @@ class TicketsAPI (TicketsAPIBase):
     user_id = sess.user_id
     qresult = db.query(
         ("select T.id, S.name, T.status from tickets T, services S "
-         "where T.service_id = S.id and T.user_id = $user_id "
+         "where T.service_githash = S.githash and T.user_id = $user_id "
          "order by T.id"),
         vars=locals());
 
@@ -637,13 +706,12 @@ class TicketsAPI (TicketsAPIBase):
     self.check_auth()
 
     # Get the requested service ID
-    service_name = web.input().service
+    githash = web.input().githash
 
-    res_svc = db.select("services",where="name=$service_name",vars=locals())
-    if len(res_svc) == 0:
+    res_svc = db.select("services",where="githash=$githash",vars=locals())
+    if len(res_svc) != 1:
       self.raise_badrequest("Service %s is not available" % service_name)
-    service_id = res_svc[0].id
-    ticket_id = db.insert("tickets",user_id=sess.user_id,service_id=service_id,status="init")
+    ticket_id = db.insert("tickets",user_id=sess.user_id,service_githash=githash,status="init")
     return ticket_id
 
 
@@ -785,13 +853,13 @@ class TicketQueuePositionAPI (TicketsAPIBase):
 class ProviderAPIBase(AbstractAPI):
 
   # Make sure that the user has access to the named service
-  def check_service_access_by_name(self, service_name):
+  def check_service_access_by_githash(self, service_githash):
 
     # Make sure we are actually logged in
     self.check_auth()
 
     # Check if the user has access to this service's tickets
-    if ServiceLogic(service_name).check_provider_access(sess.user_id) is False:
+    if ServiceLogic(service_githash).check_provider_access(sess.user_id) is False:
       self.raise_unauthorized("You are not a provider for service %s " % service_name)
     
   # Check if the provider has access to a given ticket
@@ -837,12 +905,14 @@ class ProviderServicesAPI (ProviderAPIBase):
     # Just list all the services that the provider has access to
     user_id = sess.user_id
     qresult = db.query(
-        "select S.name from providers P, services S "
-        "where P.service_id = S.id and user_id = $user_id",
+        "select S.name,S.version,S.githash,PA.provider "
+        "from services S, provider_access PA, provider_services PS "
+        "where S.githash = PS.service_githash and PA.provider = PS.provider_name "
+        "  and PA.user_id = $user_id",
         vars=locals());
 
     web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['name'])
+    return query_as_csv(qresult, ['name','version','githash','provider'])
 
 
 class ProviderServiceTicketsAPI (ProviderAPIBase):
@@ -851,7 +921,7 @@ class ProviderServiceTicketsAPI (ProviderAPIBase):
   def GET(self, service_name):
     
     # The user must have access to the service name
-    self.check_service_access_by_name(service_name)
+    self.check_service_access_by_githash(service_name)
 
     # List all of the tickets that are available under this service
     user_id = sess.user_id
@@ -869,7 +939,7 @@ class ProviderServiceTicketsAPI (ProviderAPIBase):
   def GET(self, service_name):
     
     # The user must have access to the service name
-    self.check_service_access_by_name(service_name)
+    self.check_service_access_by_githash(service_name)
 
     # List all of the tickets that are available under this service
     user_id = sess.user_id
@@ -885,10 +955,10 @@ class ProviderServiceTicketsAPI (ProviderAPIBase):
 class ProviderServiceClaimsAPI (ProviderAPIBase):
 
   # List all the claimed tickets for this service
-  def GET(self, service_name):
+  def GET(self, service_githash):
 
     # The user must have access to the service name
-    self.check_service_access_by_name(service_name)
+    self.check_service_access_by_githash(service_name)
 
     # List all of the tickets that are under this service and claimed by this provider
     user_id = sess.user_id
@@ -904,10 +974,13 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
     return query_as_csv(qresult, ['ticket_id','service_name','provider_code','atime'])
 
   # Claim the highest priority ticket under this service
-  def POST(self, service_name):
+  def POST(self, service_githash):
 
     # The user must have access to the service name
-    self.check_service_access_by_name(service_name)
+    self.check_service_access_by_githash(service_githash)
+
+    # Get the provider name
+    provider_name = web.input().provider
 
     # Get the optional provider code
     provider_code = "default"
@@ -915,7 +988,7 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
       provider_code = web.input().code
 
     # Try to claim the ticket
-    ticket_id = ServiceLogic(service_name).claim_ticket(sess.user_id, provider_code)
+    ticket_id = ServiceLogic(service_githash).claim_ticket(sess.user_id, provider_name, provider_code)
 
     # If there is no ticket to claim, we return 0, this is more meaningful than
     # a bad request header
@@ -1108,14 +1181,59 @@ class DirectDownloadAPI (AbstractAPI):
     self.raise_badrequest("Resource %s not found in directory" % hashstr)
 
      
+class AdminAbstractAPI(AbstractAPI):
+
+  # Check authorization at administrator level
+  def check_auth(self):
+    super(AdminAbstractAPI,self).check_auth()
+    email = sess.email
+    res = db.select('users', where="email=$email", vars=locals())
+    if res[0].sysadmin is not True:
+      self.raise_unauthorized("Insufficient privileges")
 
 
+class AdminCatalogAPI(AdminAbstractAPI):
 
+  def GET(self):
+    self.check_auth()
+    return "You are the admin, indeed\n"
 
+  
+class AdminCatalogRebuildAPI(AdminAbstractAPI):
 
+  def GET(self):
+    self.check_auth()
+    cl = CatalogLogic()
+    cl.rebuild()
+    return "Rebuilt service catalog"
 
+class AdminProviderUsersAPI(AdminAbstractAPI):
 
+  def GET(self,provider):
+    self.check_auth()
+    res = db.query(
+        "select U.email,P.admin from users U, provider_access P "
+        "where U.id = P.user_id and P.provider = $provider", vars=locals())
+    web.header('Content-Type','text/csv')
+    return query_as_csv(res, ['email','admin'])
 
+  def POST(self,provider):
+    self.check_auth()
+    email = web.input().email
+    isadmin = None
+    if 'admin' in web.input():
+      isadmin=int(web.input().admin)
+
+    res = db.select('users', where="email=$email", vars=locals())
+    if len(res) != 1:
+      self.raise_unauthorized('Email unrecognized by the system')
+    user_id = res[0].id
+
+    with db.transaction():
+      db.delete('provider_access', where='user_id=$user_id and provider=$provider', vars=locals())
+      db.insert('provider_access', user_id=user_id, provider=provider, admin=bool(isadmin))
+
+    return 'Added user %s to provider %s' % (email, provider)
 
 if __name__ == '__main__' :
   app.run()
