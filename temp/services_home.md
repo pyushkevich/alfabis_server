@@ -1,15 +1,24 @@
 $def with(services)
 
-Alfabis Server 1.0 -- Services
+DSS Segmentation Service Listing
 =====
 
 Defined services:
 
+<table class="pure-table">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Short Description</th>
+        </tr>
+    </thead>
+     <tbody>
 $for svc in services:
-  * $svc.name : $svc.shortdesc
+         <tr>
+           <td>$svc.name</td>
+           <td>$svc.shortdesc</td>
+         </tr>
+         </tbody>
+ </table>
 
-
-You can also
-
-* Request a new service
-* Sign up as a provider for a service
+ More services may be added in the future.

@@ -5,4 +5,6 @@ app.pyc
 .DS_Store
 postgres_data
 datastore
+runme.sh
+runme_ssl.sh
 

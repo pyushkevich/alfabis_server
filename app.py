@@ -3,6 +3,7 @@ import web,sys
 import markdown
 import json
 import os
+import shutil
 import hashlib
 import csv
 import StringIO
@@ -33,6 +34,7 @@ urls = (
   r"/acceptterms", "AcceptTermsRequest",
   r"/logout", "LogoutPage",
   r"/services", "ServicesPage",
+  r"/about", "AboutPage",
   r"/api/login", "LoginAPI",
   r"/api/oauth2cb", "OAuthCallbackAPI",
   r"/api/services", "ServicesAPI",
@@ -191,6 +193,11 @@ class ServicesPage:
     services=db.select("services")
     return render_markdown("services_home", services)
 
+class AboutPage:
+
+  def GET(self):
+    
+    return render_markdown("about")
 
 # ======================
 # Business Logic classes
@@ -293,6 +300,12 @@ class TicketLogic:
 
     # Send the directory contents as CSV
     return directory_as_csv(filedir)
+
+  # Erase the ticket file directory
+  def erase_dir(self, area):
+    filedir = 'datastore/tickets/%08d/%s' % (int(self.ticket_id), area)
+    if os.path.exists(filedir):
+      shutil.rmtree(filedir)
 
   # Receive uploaded files associated with a ticket and area
   def receive_file(self, area, fileobj):
@@ -708,10 +721,16 @@ class TicketsAPI (TicketsAPIBase):
     # Get the requested service ID
     githash = web.input().githash
 
+    # Create a new ticket
     res_svc = db.select("services",where="githash=$githash",vars=locals())
     if len(res_svc) != 1:
       self.raise_badrequest("Service %s is not available" % service_name)
     ticket_id = db.insert("tickets",user_id=sess.user_id,service_githash=githash,status="init")
+
+    # Empty the directory for this ticket (in case it exists from a previous DB)
+    for area in ('input','results'):
+      TicketLogic(ticket_id).erase_dir(area)
+
     return ticket_id
 
 

@@ -10,3 +10,28 @@
   text-align:center;
   background:lightgreen;
 }
+
+.googlebutton {
+ width: 191px;
+ height: 46px;
+ display: block;
+ background: url('/static/google/signin/btn_google_signin_dark_normal_web.png') bottom;
+}
+
+.googlebutton:hover {
+   background-image: url('/static/google/signin/btn_google_signin_dark_focus_web.png');
+}
+
+@media only screen and (min--moz-device-pixel-ratio: 2),
+only screen and (-o-min-device-pixel-ratio: 2/1),
+only screen and (-webkit-min-device-pixel-ratio: 2),
+only screen and (min-device-pixel-ratio: 2) {
+  .googlebutton {
+   background: url('/static/google/signin/btn_google_signin_dark_normal_web@2x.png') bottom;
+   background-size: 191px 46px;
+  }
+
+  .googlebutton:hover {
+     background-image: url('/static/google/signin/btn_google_signin_dark_focus_web@2x.png');
+  }
+}
