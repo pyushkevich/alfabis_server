@@ -11,6 +11,8 @@ import glob
 import uuid
 import mimetypes
 import httplib2
+import time
+import datetime
 from pprint import pprint
 from os import walk
 from os.path import basename
@@ -26,6 +28,15 @@ CherryPyWSGIServer.ssl_certificate_chain = os.environ['ALFABIS_SSL_FULLCHAIN']
 
 # Needed for session support
 web.config.debug = False
+
+# Session support
+web.config.session_parameters['cookie_name'] = 'webpy_session_id'
+web.config.session_parameters['cookie_domain'] = 'dss.itksnap.org'
+web.config.session_parameters['timeout'] = 31536000 
+web.config.session_parameters['ignore_expiry'] = True
+web.config.session_parameters['ignore_change_ip'] = True
+web.config.session_parameters['secret_key'] = 'Hdx1ym849Zj5Dg3gB8A0'
+web.config.session_parameters['expired_message'] = 'Session expired'
 
 # URL mapping
 urls = (
@@ -46,6 +57,7 @@ urls = (
   r"/api/tickets/(\d+)/log", "TicketLogAPI",
   r"/api/tickets/(\d+)/progress", "TicketProgressAPI",
   r"/api/tickets/(\d+)/queuepos", "TicketQueuePositionAPI",
+  r"/api/tickets/(\d+)/detail", "TicketDetailAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
@@ -251,6 +263,16 @@ class TicketLogic:
     # Find all the unassigned attachments for this ticket
     return log_id
 
+  # Query logs - returns a database result
+  def get_logs(self, start_id):
+
+    return db.query(
+        "select L.*,count(B.attachment_id) as attachments "
+        "  from ticket_log L left join ticket_log_attachment B on L.id = B.log_id "
+        "  where ticket_id = $self.ticket_id and id > $start_id group by L.id,log_id"
+        "  order by atime",
+        vars=locals());
+
   # Measure the total progress for a ticket
   def total_progress(self):
     res = db.query(
@@ -395,6 +417,17 @@ class TicketLogLogic:
       vars=locals())
 
     return len(res) > 0
+
+  # List all attachments for this log entry with URLs
+  def get_attachments(self):
+
+    urlbase = web.ctx.home + '/blobs/'
+    return db.query(
+      "select id,description,mime_type,$urlbase || substr(uuid,0,9) as url "
+      "  from ticket_attachment A left join ticket_log_attachment B "
+      "    on A.id = B.attachment_id "
+      "  where B.log_id = $self.log_id order by id",
+      vars=locals());
 
   # Create an attachment entry in the database and get ready to upload attachment
   def add_attachment(self, desc, filename, mime_type = None):
@@ -546,11 +579,36 @@ class ServiceLogic:
 # RESTful API
 # =====================
 
+def my_json_converter(o):
+    if isinstance(o, datetime.datetime):
+        return o.__str__()
+
+def query_as_array_of_dict(qresult, fields):
+  darray = []
+  for row in qresult:
+    drow = {}
+    for field in fields:
+      drow[field] = row[field]
+    darray.append(drow)
+  return darray;
+
+def query_as_json(qresult, fields):
+  darray = query_as_array_of_dict(qresult, fields)
+  return json.dumps({"result" : darray}, default=my_json_converter)
+
 def query_as_csv(qresult, fields):
   strout = StringIO.StringIO()
   csvout = csv.DictWriter(strout, fieldnames=fields, extrasaction='ignore')
   csvout.writerows(qresult)
   return strout.getvalue()
+
+def query_as_reqfmt(qresult, fields):
+  if 'format' in web.input() and web.input().format == 'json':
+    web.header('Content-Type','application/json')
+    return query_as_json(qresult, fields)
+  else:
+    web.header('Content-Type','text/csv')
+    return query_as_csv(qresult, fields)
 
 def directory_as_csv(dir_path):
   files = filter(os.path.isfile, glob.glob(dir_path + "/*"))
@@ -629,6 +687,12 @@ class LoginAPI:
       sess.loggedin = True
       sess.user_id = user_data.id
       sess.email = user_data.email
+
+      # Now that the user has used the token, generate a new token (so that there
+      # is no security risk from sharing tokens)
+      new_token=os.urandom(24).encode('hex')
+      db.update("users", where="passwd=$token", passwd = new_token, vars=locals())
+
       return ("logged in as %s \n" % sess.email);
 
     else:
@@ -645,8 +709,7 @@ class ServicesAPI (AbstractAPI):
     self.check_auth()
 
     qresult = db.select("services");
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['name','githash','version','shortdesc'])
+    return query_as_reqfmt(qresult, ['name','githash','version','shortdesc'])
 
 
 class ServicesDetailAPI (AbstractAPI):
@@ -705,13 +768,12 @@ class TicketsAPI (TicketsAPIBase):
     # Select from the database
     user_id = sess.user_id
     qresult = db.query(
-        ("select T.id, S.name, T.status from tickets T, services S "
+        ("select T.id, S.name as service, T.status from tickets T, services S "
          "where T.service_githash = S.githash and T.user_id = $user_id "
          "order by T.id"),
         vars=locals());
 
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['id','name','status'])
+    return query_as_reqfmt(qresult, ['id','service','status'])
 
   def POST(self):
 
@@ -815,14 +877,10 @@ class TicketLogAPI (TicketsAPIBase):
       start_id=web.input().since
 
     # Get all the log entries since the last one
-    qresult = db.query(
-        "select L.*,count(B.attachment_id) as attachments "
-        "  from ticket_log L left join ticket_log_attachment B on L.id = B.log_id "
-        "  where ticket_id = $ticket_id and id > $start_id group by L.id,log_id",
-        vars=locals());
+    qresult = TicketLogic(ticket_id).get_logs(start_id)
 
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['id','atime','category','attachments','message'])
+    # Return the log entries
+    return query_as_reqfmt(qresult, ['id','atime','category','attachments','message'])
 
 
 class TicketLogAttachmentAPI (TicketsAPIBase):
@@ -833,17 +891,10 @@ class TicketLogAttachmentAPI (TicketsAPIBase):
     self.check_log_entry_access(log_id)
 
     # Get the list of all attachments with URLs
-    urlbase = web.ctx.home + '/blobs/'
-    qresult = db.query(
-      "select id,description,mime_type,$urlbase || substr(uuid,0,9) as url "
-      "  from ticket_attachment A left join ticket_log_attachment B "
-      "    on A.id = B.attachment_id "
-      "  where B.log_id = $log_id order by id",
-      vars=locals());
+    qresult = TicketLogLogic(log_id).get_attachments()
 
     # Return as CSV
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['id','description','mime_type','url'])
+    return query_as_reqfmt(qresult, ['id','description','mime_type','url'])
 
 
 class TicketProgressAPI (TicketsAPIBase):
@@ -866,7 +917,56 @@ class TicketQueuePositionAPI (TicketsAPIBase):
 
     # Return progres as a string
     return TicketLogic(ticket_id).queue_position()
-      
+    
+
+# Return complete detail of a ticket in JSON
+class TicketDetailAPI (TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_access(ticket_id)
+
+    # Initialize the query result
+    qr = {}
+
+    # Get the status of this ticket
+    qr['status'] = db.select('tickets', where='id=$ticket_id', vars=locals())[0].status;
+
+    # Depending on status, assign progress
+    if qr['status'] == 'claimed':
+      qr['progress'] = float(TicketLogic(ticket_id).total_progress())
+    elif qr['status'] in ('failed','success','timeout'):
+      qr['progress'] = 1.0
+    else:
+      qr['progress'] = 0.0
+
+    # User can request partial update since given log_id
+    start_id=0
+    if "since" in web.input():
+      start_id=web.input().since
+
+    # Get the logs for this ticket
+    qresult = TicketLogic(ticket_id).get_logs(start_id)
+
+    # Convert this query to an array
+    logs = query_as_array_of_dict(qresult, ['id','atime','category','attachments','message'])
+
+    # For each entry in the log array, get its attachments
+    for log_entry in logs:
+      if log_entry['attachments'] > 0:
+        qresult = TicketLogLogic(log_entry['id']).get_attachments()
+        log_entry['attachments'] = query_as_array_of_dict(qresult, ['id','description','mime_type','url'])
+      else:
+        log_entry['attachments'] = []
+
+    # Store the logs
+    qr['log'] = logs
+
+    # Return the JSON for this data
+    web.header('Content-Type','application/json')
+    return json.dumps({"result" : qr}, default=my_json_converter)
+
 
 # Base API for ticket provider classes    
 class ProviderAPIBase(AbstractAPI):
@@ -930,8 +1030,7 @@ class ProviderServicesAPI (ProviderAPIBase):
         "  and PA.user_id = $user_id",
         vars=locals());
 
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['name','version','githash','provider'])
+    return query_as_reqfmt(qresult, ['name','version','githash','provider'])
 
 
 class ProviderServiceTicketsAPI (ProviderAPIBase):
@@ -949,8 +1048,7 @@ class ProviderServiceTicketsAPI (ProviderAPIBase):
         "where T.service_id = S.id and S.name = $service_name",
         vars=locals());
 
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['id','status'])
+    return query_as_reqfmt(qresult, ['id','status'])
 
 class ProviderServiceTicketsAPI (ProviderAPIBase):
 
@@ -967,8 +1065,7 @@ class ProviderServiceTicketsAPI (ProviderAPIBase):
         "where T.service_id = S.id and S.name = $service_name",
         vars=locals());
 
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['id','status'])
+    return query_as_reqfmt(qresult, ['id','status'])
 
 
 class ProviderServiceClaimsAPI (ProviderAPIBase):
@@ -989,8 +1086,7 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
         "  and C.provider_id = $user_id",
         vars=locals());
 
-    web.header('Content-Type','text/csv')
-    return query_as_csv(qresult, ['ticket_id','service_name','provider_code','atime'])
+    return query_as_reqfmt(qresult, ['ticket_id','service_name','provider_code','atime'])
 
   # Claim the highest priority ticket under this service
   def POST(self, service_githash):
@@ -1233,8 +1329,7 @@ class AdminProviderUsersAPI(AdminAbstractAPI):
     res = db.query(
         "select U.email,P.admin from users U, provider_access P "
         "where U.id = P.user_id and P.provider = $provider", vars=locals())
-    web.header('Content-Type','text/csv')
-    return query_as_csv(res, ['email','admin'])
+    return query_as_reqfmt(res, ['email','admin'])
 
   def POST(self,provider):
     self.check_auth()
