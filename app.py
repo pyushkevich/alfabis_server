@@ -18,13 +18,13 @@ from os import walk
 from os.path import basename
 from oauth2client import client
 from apiclient.discovery import build
-from web.wsgiserver import CherryPyWSGIServer
+# from web.wsgiserver import CherryPyWSGIServer
 from git import Repo
 
 # Enable SSL support
-CherryPyWSGIServer.ssl_certificate = os.environ['ALFABIS_SSL_CERT']
-CherryPyWSGIServer.ssl_private_key = os.environ['ALFABIS_SSL_KEY']
-CherryPyWSGIServer.ssl_certificate_chain = os.environ['ALFABIS_SSL_FULLCHAIN']
+# CherryPyWSGIServer.ssl_certificate = os.environ['ALFABIS_SSL_CERT']
+# CherryPyWSGIServer.ssl_private_key = os.environ['ALFABIS_SSL_KEY']
+# CherryPyWSGIServer.ssl_certificate_chain = os.environ['ALFABIS_SSL_FULLCHAIN']
 
 # Needed for session support
 web.config.debug = False
@@ -1355,5 +1355,6 @@ class AdminProviderUsersAPI(AdminAbstractAPI):
 
     return 'Added user %s to provider %s' % (email, provider)
 
-if __name__ == '__main__' :
-  app.run()
+###  if __name__ == '__main__' :
+###  app.run()
+application=app.wsgifunc()
