@@ -281,6 +281,8 @@ class TicketLogic:
       vars=locals())
     if len(res) > 0:
       return res[0].x
+    else:
+      return 0
 
   # Measure the total progress for a ticket
   def queue_position(self):
@@ -570,6 +572,10 @@ class ServiceLogic:
 
       # Mark the ticket as claimed
       db.update("tickets", where="id = $ticket_id", status = "claimed", vars=locals())
+
+      # Update the log for the user
+      TicketLogic(ticket_id).append_log("info",
+          "Ticket claimed by provider %s instance %s" % (provider_name,provider_code));
 
       # Return the ticket ID
       return ticket_id
