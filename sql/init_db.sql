@@ -45,7 +45,7 @@ create table services
 insert into services (name,shortdesc) values ('PICSL-HarP','Hippocampus segmentation with HarP protocol in 3 Tesla T1w-MRI'); */
 
 drop type if exists ticket_status cascade;
-create type ticket_status as enum ('init','ready','claimed','success','failed','timeout');
+create type ticket_status as enum ('init','ready','claimed','success','failed','timeout','deleted');
 
 drop table if exists tickets cascade;
 create table tickets

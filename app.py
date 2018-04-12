@@ -18,13 +18,7 @@ from os import walk
 from os.path import basename
 from oauth2client import client
 from apiclient.discovery import build
-# from web.wsgiserver import CherryPyWSGIServer
 from git import Repo
-
-# Enable SSL support
-# CherryPyWSGIServer.ssl_certificate = os.environ['ALFABIS_SSL_CERT']
-# CherryPyWSGIServer.ssl_private_key = os.environ['ALFABIS_SSL_KEY']
-# CherryPyWSGIServer.ssl_certificate_chain = os.environ['ALFABIS_SSL_FULLCHAIN']
 
 # Needed for session support
 web.config.debug = False
@@ -58,6 +52,7 @@ urls = (
   r"/api/tickets/(\d+)/progress", "TicketProgressAPI",
   r"/api/tickets/(\d+)/queuepos", "TicketQueuePositionAPI",
   r"/api/tickets/(\d+)/detail", "TicketDetailAPI",
+  r"/api/tickets/(\d+)/delete", "TicketDeleteAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
@@ -233,6 +228,10 @@ class TicketLogic:
       vars=locals())
     return len(res) > 0 and (status_list is None or res[0].status in status_list)
 
+  def is_not_deleted(self):
+    res = db.select("tickets",where="id=$self.ticket_id", vars=locals())
+    return len(res) > 0 and (res[0].status != 'deleted')
+
   # Check that the specified provider has actually claimed this ticket 
   def check_provider_claimed(self, user_id):
     res = db.select("claim_history", 
@@ -331,6 +330,12 @@ class TicketLogic:
     if os.path.exists(filedir):
       shutil.rmtree(filedir)
 
+  # Erase the attachments for a ticket
+  def erase_attachments(self):
+    filedir = 'datastore/attachments/%08d' % int(self.ticket_id)
+    if os.path.exists(filedir):
+      shutil.rmtree(filedir)
+
   # Receive uploaded files associated with a ticket and area
   def receive_file(self, area, fileobj):
 
@@ -359,8 +364,21 @@ class TicketLogic:
 
     return filename
 
+  # Delete the ticket
+  def delete_ticket(self):
 
+    # Mark the ticket as having been deleted
+    db.update("tickets", where="id = $self.ticket_id", status = 'deleted', vars=locals())
+    new_status = db.select("tickets", where="id=$self.ticket_id", vars=locals())[0].status;
 
+    # Empty the directory for this ticket (in case it exists from a previous DB)
+    for area in ('input','results'):
+      TicketLogic(self.ticket_id).erase_dir(area)
+
+    # Clear the attachments
+    TicketLogic(self.ticket_id).erase_attachments()
+
+    return new_status
 
   # Create an attachment entry in the database and get ready to upload attachment
   def add_attachment(self, desc, filename, mime_type = None):
@@ -775,7 +793,7 @@ class TicketsAPI (TicketsAPIBase):
     user_id = sess.user_id
     qresult = db.query(
         ("select T.id, S.name as service, T.status from tickets T, services S "
-         "where T.service_githash = S.githash and T.user_id = $user_id "
+         "where T.service_githash = S.githash and T.user_id = $user_id and T.status != 'deleted' "
          "order by T.id"),
         vars=locals());
 
@@ -973,6 +991,13 @@ class TicketDetailAPI (TicketsAPIBase):
     web.header('Content-Type','application/json')
     return json.dumps({"result" : qr}, default=my_json_converter)
 
+# Delete a ticket
+class TicketDeleteAPI(TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    self.check_ticket_access(ticket_id)
+    return TicketLogic(ticket_id).delete_ticket()
 
 # Base API for ticket provider classes    
 class ProviderAPIBase(AbstractAPI):
@@ -1006,6 +1031,11 @@ class ProviderAPIBase(AbstractAPI):
     # Check if the ticket belongs to this user
     if TicketLogic(ticket_id).check_provider_claimed(sess.user_id) is False:
       self.raise_badrequest("Ticket %s has not been claimed by user %s" % (ticket_id,sess.user_id))
+
+    # Check that the ticket has not been deleted
+    if TicketLogic(ticket_id).is_not_deleted() is False:
+      self.raise_badrequest("Ticket %s has been deleted " % ticket_id)
+
 
   # Check if the provider can edit a log entry
   def check_log_entry_access(self, log_id):
