@@ -44,6 +44,7 @@ urls = (
   r"/api/oauth2cb", "OAuthCallbackAPI",
   r"/api/services", "ServicesAPI",
   r"/api/services/([a-f0-9]+)/detail", "ServicesDetailAPI",
+  r"/api/services/([a-f0-9]+)/stats", "ServicesStatsAPI",
   r"/api/tickets", "TicketsAPI",
   r"/api/tickets/(\d+)/files/(input|results)", "TicketFilesAPI",
   r"/api/tickets/(\d+)/files/(input|results)/(\d+)", "TicketFileDownloadAPI",
@@ -57,6 +58,7 @@ urls = (
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
   r"/api/pro/services/([a-f0-9]+)/claims", "ProviderServiceClaimsAPI",
+  r"/api/pro/services/claims", "ProviderMultipleServiceClaimsAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)", "ProviderTicketFilesAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)/(\d+)", "ProviderTicketFileDownloadAPI",
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
@@ -239,6 +241,22 @@ class TicketLogic:
       vars=locals());
     return len(res) > 0
 
+  # Set the status of the ticket. This sets the status in the 'tickets' table but
+  # also logs the status change in the 'ticket_history' table
+  def set_status(self, new_status):
+
+    with db.transaction():
+
+      # Set the status of the ticket in the database
+      db.update("tickets", where="id = $self.ticket_id", status = new_status, vars=locals())
+
+      # Insert the history entry
+      db.insert("ticket_history", ticket_id = self.ticket_id, status = new_status);
+
+      # Return the new status
+      return db.select("tickets", where="id=$self.ticket_id", vars=locals())[0].status;
+
+
   # Add a message to the ticket log
   def append_log(self, category, message):
 
@@ -275,11 +293,11 @@ class TicketLogic:
   # Measure the total progress for a ticket
   def total_progress(self):
     res = db.query(
-      "select sum((chunk_end-chunk_start) * progress) as x from ticket_progress "
+      "select greatest(0, sum((chunk_end-chunk_start) * progress)) as x from ticket_progress "
       "where ticket_id=$self.ticket_id", 
       vars=locals())
     if len(res) > 0:
-      return res[0].x
+      return float(res[0].x)
     else:
       return 0
 
@@ -368,8 +386,7 @@ class TicketLogic:
   def delete_ticket(self):
 
     # Mark the ticket as having been deleted
-    db.update("tickets", where="id = $self.ticket_id", status = 'deleted', vars=locals())
-    new_status = db.select("tickets", where="id=$self.ticket_id", vars=locals())[0].status;
+    new_status = TicketLogic(self.ticket_id).set_status("deleted")
 
     # Empty the directory for this ticket (in case it exists from a previous DB)
     for area in ('input','results'):
@@ -545,6 +562,54 @@ class CatalogLogic:
             print("Unexpected error:", sys.exc_info())
         
 
+# Logic around claiming tickets and scheduling
+class ClaimLogic:
+
+  def __init__(self, user_id, provider_name, provider_code):
+    (self.user_id, self.provider_name, self.provider_code) = (user_id, provider_name, provider_code)
+
+  def claim_multiservice(self, service_githash_list):
+
+    # Put the services back together into a SQL passable string
+    svc_sql =  ",".join("'{0}'".format(w) for w in service_githash_list)
+
+    with db.transaction():
+
+      # Do the SQL call to find the service to use.
+      # TODO: we need some sort of a fair scheduling scheme. The current scheme is 
+      # pretty ridiculous
+      res = db.query(
+        "select id from tickets "
+        "where service_githash in (%s) "
+        "  and status = 'ready' "
+        "order by id asc limit 1" % svc_sql)
+
+      # Nothing returned? Means there are no ready tickets
+      if len(res) == 0:
+        return None
+
+      # Now we have a ticket
+      ticket_id = res[0].id
+      tl = TicketLogic(ticket_id)
+
+      # Make an entry in the claims table, to keep track of this claim
+      db.insert("claim_history", 
+                ticket_id=ticket_id, 
+                provider=self.provider_name, 
+                provider_code=self.provider_code,
+                puser_id=self.user_id)
+
+      # Mark the ticket as claimed
+      tl.set_status("claimed")
+
+      # Update the log for the user
+      tl.append_log("info", "Ticket claimed by provider %s instance %s" 
+                    % (self.provider_name,self.provider_code))
+
+      # Return the ticket id and service hash
+      return db.select("tickets", where="id=$ticket_id", vars=locals())
+
+
 # Logic around services. This class is initialized with a service ID
 class ServiceLogic:
 
@@ -589,11 +654,11 @@ class ServiceLogic:
                 puser_id=user_id)
 
       # Mark the ticket as claimed
-      db.update("tickets", where="id = $ticket_id", status = "claimed", vars=locals())
+      TicketLogic(ticket_id).set_status("claimed")
 
       # Update the log for the user
       TicketLogic(ticket_id).append_log("info",
-          "Ticket claimed by provider %s instance %s" % (provider_name,provider_code));
+          "Ticket claimed by provider %s instance %s" % (provider_name,provider_code))
 
       # Return the ticket ID
       return ticket_id
@@ -749,6 +814,14 @@ class ServicesDetailAPI (AbstractAPI):
     web.header('Content-Type','application/json')
     return json
 
+class ServicesStatsAPI (AbstractAPI):
+
+  def GET(self, githash):
+
+    return 0
+
+
+
 
 class TicketsAPIBase(AbstractAPI):
 
@@ -807,11 +880,16 @@ class TicketsAPI (TicketsAPIBase):
     # Get the requested service ID
     githash = web.input().githash
 
-    # Create a new ticket
+    # Make sure the service exists
     res_svc = db.select("services",where="githash=$githash",vars=locals())
     if len(res_svc) != 1:
       self.raise_badrequest("Service %s is not available" % service_name)
+
+    # Create a new ticket
     ticket_id = db.insert("tickets",user_id=sess.user_id,service_githash=githash,status="init")
+
+    # Also add an entry into the history
+    db.insert("ticket_history", ticket_id = ticket_id, status = "init")
 
     # Empty the directory for this ticket (in case it exists from a previous DB)
     for area in ('input','results'):
@@ -878,12 +956,13 @@ class TicketStatusAPI (TicketsAPIBase):
     # New status must be supplied
     new_status = web.input().status
 
+    # Make sure we have the ticket 
+    self.check_ticket_access(ticket_id, ["init"])
+
     # Check if the current status is appropriate for the new status
     if new_status == "ready":
       with db.transaction():
-        self.check_ticket_access(ticket_id, ["init"])
-        n = db.update("tickets", where="id = $ticket_id", status = new_status, vars=locals())
-        return db.select("tickets", where="id=$ticket_id", vars=locals())[0].status;
+        return TicketLogic(ticket_id).set_status(new_status)
 
     self.raise_badrequest("Changing ticket status to %s is not supported" % new_status)
 
@@ -1010,7 +1089,7 @@ class ProviderAPIBase(AbstractAPI):
 
     # Check if the user has access to this service's tickets
     if ServiceLogic(service_githash).check_provider_access(sess.user_id) is False:
-      self.raise_unauthorized("You are not a provider for service %s " % service_name)
+      self.raise_unauthorized("You are not a provider for service %s " % service_githash)
     
   # Check if the provider has access to a given ticket
   def check_ticket_access(self, ticket_id, status_list = None):
@@ -1036,7 +1115,6 @@ class ProviderAPIBase(AbstractAPI):
     if TicketLogic(ticket_id).is_not_deleted() is False:
       self.raise_badrequest("Ticket %s has been deleted " % ticket_id)
 
-
   # Check if the provider can edit a log entry
   def check_log_entry_access(self, log_id):
 
@@ -1046,6 +1124,21 @@ class ProviderAPIBase(AbstractAPI):
     # Check if the ticket belongs to this user
     if TicketLogLogic(log_id).check_provider_access(sess.user_id, ('open')) is False:
       self.raise_badrequest("Log entry %s is not writable by user %s" % (log_id,sess.user_id))
+
+  # Get the provider name and code from web input
+  def get_provider_info(self):
+
+    # Get the provider name
+    provider_name = web.input().provider
+
+    # Get the optional provider code
+    provider_code = "default"
+    if 'code' in web.input():
+      provider_code = web.input().code
+
+    return (provider_name, provider_code)
+
+
 
 
 
@@ -1130,13 +1223,8 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
     # The user must have access to the service name
     self.check_service_access_by_githash(service_githash)
 
-    # Get the provider name
-    provider_name = web.input().provider
-
-    # Get the optional provider code
-    provider_code = "default"
-    if 'code' in web.input():
-      provider_code = web.input().code
+    # Get the provider info
+    (provider_name, provider_code) = self.get_provider_info()
 
     # Try to claim the ticket
     ticket_id = ServiceLogic(service_githash).claim_ticket(sess.user_id, provider_name, provider_code)
@@ -1149,8 +1237,29 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
     # Return the claimed ticket ID
     return ticket_id
 
+class ProviderMultipleServiceClaimsAPI (ProviderAPIBase):
 
- 
+  # The caller passes in a comma-separated list of services. The server returns the 
+  # ticket ID, service name and service git-hash that was selected for servicing
+  def POST(self):
+
+    if "services" not in web.input():
+      self.raise_badrequest("Missing 'services' parameter")
+
+    # Split services on the comma and add to query string
+    svclist = web.input().services.split(',')
+    for svc in svclist:
+      self.check_service_access_by_githash(svc)
+
+    # Get the provider info
+    (provider_name, provider_code) = self.get_provider_info()
+
+    # Call the business logic method
+    qresult = ClaimLogic(sess.user_id, provider_name, provider_code).claim_multiservice(svclist)
+    if qresult is not None:
+      return query_as_reqfmt(qresult, ['id', 'service_githash', 'status'])
+
+
 class ProviderTicketStatusAPI (ProviderAPIBase):
 
   # Provide the status of this ticket
@@ -1176,10 +1285,7 @@ class ProviderTicketStatusAPI (ProviderAPIBase):
       self.raise_badrequest("Cannot set status of ticket to %s" % new_status)
 
     # Set the status of the ticket in the database
-    db.update("tickets", where="id = $ticket_id", status = new_status, vars=locals())
-
-    # All good!
-    return db.select("tickets", where="id=$ticket_id", vars=locals())[0].status;
+    return TicketLogic(ticket_id).set_status(new_status)
 
 
 

@@ -52,7 +52,7 @@ create table tickets
 (
   id serial PRIMARY KEY,
   user_id int references users(id) not null,
-  service_githash char(40) references services(githash) not null,
+  service_githash not null,
   status ticket_status
 );
 
@@ -128,4 +128,14 @@ create table ticket_log_attachment
   attachment_id int references ticket_attachment(id),
   PRIMARY KEY (log_id, attachment_id)
 );
+
+drop table if exists ticket_history cascade;
+create table ticket_history
+(
+  id serial primary key,
+  ticket_id int references tickets(id),
+  status ticket_status,
+  atime timestamp not null default current_timestamp
+);
+
 
