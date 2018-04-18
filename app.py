@@ -54,6 +54,7 @@ urls = (
   r"/api/tickets/(\d+)/queuepos", "TicketQueuePositionAPI",
   r"/api/tickets/(\d+)/detail", "TicketDetailAPI",
   r"/api/tickets/(\d+)/delete", "TicketDeleteAPI",
+  r"/api/tickets/(\d+)/retry", "TicketRetryAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
@@ -68,6 +69,8 @@ urls = (
   r"/api/admin/catalog","AdminCatalogAPI", 
   r"/api/admin/catalog/rebuild","AdminCatalogRebuildAPI", 
   r"/api/admin/providers/([\w\-]+)/users","AdminProviderUsersAPI", 
+  r"/api/admin/tickets/purge/(completed|all)","AdminPurgeTicketsAPI", 
+  r"/api/admin/tickets","AdminTicketsAPI", 
   r"/blobs/([a-f0-9]{8})", "DirectDownloadAPI",
   r"/blobs/([a-f0-9]{32})", "DirectDownloadAPI"
   )
@@ -224,9 +227,9 @@ class TicketLogic:
 
   def check_provider_access(self, provider_id, status_list = None):
     res = db.query(
-      "select T.id, T.status from tickets T, providers P "
-      "where T.service_id = P.service_id and P.user_id = $provider_id "
-      "  and T.id = $self.ticket_id",
+      "select T.id, T.status from tickets T, provider_access PA, provider_services PS "
+      "where T.id = $self.ticket_id and PA.user_id = $provider_id "
+      "  and T.service_githash = PS.service_githash and PA.provider = PS.provider_name",
       vars=locals())
     return len(res) > 0 and (status_list is None or res[0].status in status_list)
 
@@ -386,15 +389,30 @@ class TicketLogic:
   def delete_ticket(self):
 
     # Mark the ticket as having been deleted
-    new_status = TicketLogic(self.ticket_id).set_status("deleted")
+    new_status = self.set_status("deleted")
 
     # Empty the directory for this ticket (in case it exists from a previous DB)
     for area in ('input','results'):
-      TicketLogic(self.ticket_id).erase_dir(area)
+      self.erase_dir(area)
 
     # Clear the attachments
-    TicketLogic(self.ticket_id).erase_attachments()
+    self.erase_attachments()
 
+    return new_status
+
+  # Retry ticket
+  def retry(self):
+
+    # Mark the ticket as being ready again
+    new_status = self.set_status("ready")
+
+    # Empty the results directory for the ticket (just in case)
+    self.erase_dir("results")
+
+    # Make a log entry
+    self.append_log("info", "Retrying ticket")
+
+    # Return the new status
     return new_status
 
   # Create an attachment entry in the database and get ready to upload attachment
@@ -730,6 +748,31 @@ class AbstractAPI(object):
   def raise_badrequest(self, message = "bad request"):
     raise web.HTTPError("400 bad request", {}, message)
 
+  # Get the githash of the requested service, either by name or by githash
+  def get_service_githash(self):
+
+    # If githash specified, we are done
+    if 'githash' in web.input():
+      return web.input().githash
+
+    # If name specified, find the latest service
+    if 'name' in web.input():
+      name = web.input().name
+      qresult = db.query(
+        "select to_number(split_part(version,'.',1),'999') as major, "
+        "       to_number(split_part(version,'.',2),'999') as minor, "
+        "       to_number(split_part(version,'.',3),'999') as patch, "
+        "       githash from services where name=$name "
+        "order by major desc,minor desc,patch desc limit 1", vars=locals());
+      if len(qresult) == 1:
+        return qresult[0].githash
+      else:
+        self.raise_badrequest("Unable to find service named %s" % name)
+
+    # What do we do?
+    self.raise_badrequest("Unable to find service: neither name nor githash specified")
+
+
 class OAuthCallbackAPI:
   
   def GET(self):
@@ -837,6 +880,7 @@ class TicketsAPIBase(AbstractAPI):
       self.raise_badrequest("Ticket %s not found for user %s" % (ticket_id,sess.user_id))
 
 
+
   # Make sure we have access to a log entry
   def check_log_entry_access(self, log_id):
 
@@ -878,7 +922,7 @@ class TicketsAPI (TicketsAPIBase):
     self.check_auth()
 
     # Get the requested service ID
-    githash = web.input().githash
+    githash = self.get_service_githash()
 
     # Make sure the service exists
     res_svc = db.select("services",where="githash=$githash",vars=locals())
@@ -1077,6 +1121,17 @@ class TicketDeleteAPI(TicketsAPIBase):
 
     self.check_ticket_access(ticket_id)
     return TicketLogic(ticket_id).delete_ticket()
+
+class TicketRetryAPI(TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    # Check that the status of the ticket is correct
+    self.check_ticket_access(ticket_id, ["failed","timeout"])
+
+    # TODO: check that the number of retries has not been exceeded
+    return TicketLogic(ticket_id).retry()
+
 
 # Base API for ticket provider classes    
 class ProviderAPIBase(AbstractAPI):
@@ -1464,6 +1519,7 @@ class AdminCatalogRebuildAPI(AdminAbstractAPI):
     cl.rebuild()
     return "Rebuilt service catalog"
 
+
 class AdminProviderUsersAPI(AdminAbstractAPI):
 
   def GET(self,provider):
@@ -1490,6 +1546,66 @@ class AdminProviderUsersAPI(AdminAbstractAPI):
       db.insert('provider_access', user_id=user_id, provider=provider, admin=bool(isadmin))
 
     return 'Added user %s to provider %s' % (email, provider)
+
+
+class AdminTicketsAPI(AdminAbstractAPI):
+
+  # Get all the tickets with status
+  def GET(self):
+
+    self.check_auth();
+
+    # Select from the database
+    qresult = db.query(
+        ("select T.id, T.user_id, S.name as service, T.status from tickets T, services S "
+         "where T.service_githash = S.githash and T.status != 'deleted' "
+         "order by T.id"),
+        vars=locals());
+
+    return query_as_reqfmt(qresult, ['id','user_id','service','status'])
+
+
+class AdminPurgeTicketsAPI(AdminAbstractAPI):
+
+  def POST(self, ticket_mode):
+
+    self.check_auth();
+
+    # Check the number of days to purge
+    if 'days' in web.input():
+      interval="%f days" % float(web.input().days)
+    elif 'hours' in web.input():
+      interval="%f hours" % float(web.input().hours)
+    else:
+      interval="7 days"
+
+    # What kinds of tickets to purge (completed or all)
+    if ticket_mode == 'completed':
+      status_list="('failed','success','timeout')"
+    else:
+      status_list="('failed','success','timeout','init','ready','claimed')"
+
+    # List the tickets that can be purged
+    qresult = db.query(
+      "select T.id,H.atime,T.status from tickets T, ticket_history H "
+      "where T.id = H.ticket_id and T.status in %s "
+      "  and H.status = 'init' and now() - H.atime > interval $interval" % status_list,
+      vars=locals());
+
+    # Purge each of the tickets in the list
+    for row in qresult:
+      TicketLogic(row.id).delete_ticket()
+
+    # Get the list of tickets 
+    return "Purged %d tickets" % len(qresult)
+
+
+
+
+
+
+
+
 
 ###  if __name__ == '__main__' :
 ###  app.run()
