@@ -161,8 +161,7 @@ class index:
 # Handler for accepting terms of service
 class AcceptTermsRequest:
   def POST(self):
-    cb=web.input().cb
-    if cb == 'on':
+    if 'cb' in web.input() and web.input().cb == 'on':
       sess.acceptterms = True
       raise web.redirect("/token")
     else:
@@ -199,11 +198,72 @@ class ServicesPage:
 
   def GET(self):
     
+    # We must be logged in, but not much else
     if sess.loggedin is not True:
       raise web.redirect("/")
 
-    services=db.select("services")
-    return render_markdown("services_home", services)
+    # Get a listing of services with details
+    services = db.query(
+      "select name, shortdesc, githash, json, now() - pingtime as since, "
+      "       D.avg as avg_runtime, n_success, n_failed, "
+      "       greatest(0,W.count) as queue_length "
+      "from services S "
+      "     left join ( "
+      "         select service_githash, avg(runtime) "
+      "         from success_ticket_duration "
+      "         where now() - endtime < interval '1 day' "
+      "         group by service_githash "
+      "     ) D on S.githash = D.service_githash "
+      "     left join ( "
+      "         select service_githash, "
+      "                greatest(0,sum(cast (TH.status = 'success' as int))) as n_success, "
+      "                greatest(0,sum(cast (TH.status in ( 'failed', 'timeout') as int))) as n_failed "
+      "         from ticket_history TH, tickets T "
+      "         where TH.ticket_id = T.id  and now() - atime < interval '1 day' "
+      "         group by service_githash "
+      "     ) Q on Q.service_githash = githash "
+      "     left join ( "
+      "         select service_githash, count(id) "
+      "         from tickets where status='ready' group by service_githash "
+      "     ) W on W.service_githash = githash "
+      "order by n_success desc");
+
+    # Parse through the results into something more readable
+    serv_data = []
+    for x in services:
+      s = {}
+      j = json.loads(x.json)
+      s['name'] = x.name
+      s['shortdesc'] = x.shortdesc;
+      s['longdesc'] = j['longdesc'];
+      s['url'] = j['url'];
+      alive_sec = x.since.total_seconds();
+      s['alive_btn'] = 'green' if alive_sec < 600 else ('yellow' if alive_sec < 3600 else 'red')
+      s['alive_min'] = round(alive_sec / 60,2)
+
+      n_s = x.n_success if x.n_success is not None else 0
+      n_f = x.n_failed if x.n_failed is not None else 0
+
+      if n_s + n_f == 0:
+        s['srate_btn'] = "cyan"
+        s['srate_tooltip'] = "No tickets completed in the last 24 hours"
+      else:
+        err_rate = n_f * 1.0 / (n_s + n_f)
+        s['srate_btn'] = "green" if err_rate < 0.1 else ("yellow" if err_rate < 0.2 else "red")
+        s['srate_tooltip'] = "Success: %d, Failed: %d, Error Rate: %f" % (n_s, n_f, err_rate)
+
+      ql = x.queue_length
+      s['queuelen_btn'] = "cyan" if ql == 0 else ("green" if ql < 5 else ("yellow" if ql < 25 else "red"))
+      s['queuelen'] = x.queue_length
+
+      if x.avg_runtime is not None:
+        s['runtime'] = "<br>%4.1f min" % (x.avg_runtime.total_seconds() / 60.0)
+      else:
+        s['runtime'] = ""
+
+      serv_data.append(s)
+
+    return render_markdown("services_home", serv_data)
 
 class AboutPage:
 
