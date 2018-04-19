@@ -318,6 +318,13 @@ class TicketLogic:
   # Update the progress of a ticket for a chunk
   def set_chunk_progress(self, chunk_start, chunk_end, progress):
     with db.transaction():
+
+      # Update the ping on this service
+      db.query(
+        "update services as S set pingtime=now() "
+        "from tickets as T "
+        "where S.githash = T.service_githash and T.id = $self.ticket_id", vars=locals());
+
       # Try to update the progress line
       n = db.update("ticket_progress", 
         where="ticket_id = $self.ticket_id and chunk_start=$chunk_start and chunk_end=$chunk_end", 
@@ -593,6 +600,9 @@ class ClaimLogic:
 
     with db.transaction():
 
+      # Update the ping on all services
+      db.query("update services set pingtime=now() where githash in (%s)" % svc_sql)
+
       # Do the SQL call to find the service to use.
       # TODO: we need some sort of a fair scheduling scheme. The current scheme is 
       # pretty ridiculous
@@ -648,6 +658,9 @@ class ServiceLogic:
     # Create a transaction because this operation must be atomic
     with db.transaction():
 
+      # Update the ping on this service
+      db.query("update services set pingtime=now() where githash = $self.service_githash", vars = locals());
+
       # Get the highest priority 'ready' ticket. TODO: For now the priority is just based
       # on the ticket serial number, but this will need to be updated to use an actual
       # prioritization system in the future
@@ -688,6 +701,8 @@ class ServiceLogic:
 
 def my_json_converter(o):
     if isinstance(o, datetime.datetime):
+        return o.__str__()
+    if isinstance(o, datetime.timedelta):
         return o.__str__()
 
 def query_as_array_of_dict(qresult, fields):
@@ -857,12 +872,59 @@ class ServicesDetailAPI (AbstractAPI):
     web.header('Content-Type','application/json')
     return json
 
+
 class ServicesStatsAPI (AbstractAPI):
 
   def GET(self, githash):
 
-    return 0
+    self.check_auth()
 
+    # try:
+
+    # The dictionary for the statistics
+    retval = {}
+
+    # Get the number of successful and failed tickets in the last 24 hours
+    q1 = db.query(
+      "select greatest(0,sum(cast (TH.status = 'success' as int))) as n_success, "
+      "       greatest(0,sum(cast (TH.status in ( 'failed', 'timeout') as int))) as n_failed "
+      "from ticket_history TH, tickets T where TH.ticket_id = T.id "
+      "     and now() - atime < interval '24 hours' "
+      "     and service_githash = $githash", vars=locals())[0];
+
+    retval['n_success'] = q1.n_success
+    retval['n_failed'] = q1.n_failed
+
+    # Get the average ticket duration
+    if retval['n_success'] > 0:
+      q2 = db.query(
+        "select avg(runtime) as avg_duration "
+        "from success_ticket_duration "
+        "where service_githash = $githash "
+        "      and now() - endtime < interval '24 hours'", vars=locals());
+
+      retval['avg_duration'] = q2[0].avg_duration
+
+    # Get the last time we heard from this service
+    q3 = db.query(
+      "select now() - pingtime as deltat "
+      "from services where githash=$githash", vars=locals());
+    retval['last_heard_from'] = q3[0].deltat
+
+    # Get the size of the queue for this service (all tickets in ready state)
+    q4 = db.query(
+      "select count(id) from tickets "
+      "where service_githash=$githash "
+      "      and status = 'ready'", vars=locals());
+    retval['queue_length'] = q4[0].count
+
+    # Return the results in requested format
+    print retval
+    return query_as_reqfmt([retval], retval.keys())
+      
+
+    #except:
+    #  self.raise_badrequest("Error getting statistics for service %s")
 
 
 
@@ -1557,12 +1619,18 @@ class AdminTicketsAPI(AdminAbstractAPI):
 
     # Select from the database
     qresult = db.query(
-        ("select T.id, T.user_id, S.name as service, T.status from tickets T, services S "
-         "where T.service_githash = S.githash and T.status != 'deleted' "
-         "order by T.id"),
-        vars=locals());
+      "select T.id, T.status, U.email, "
+      "       case when S.name is null then T.service_githash else S.name end as service, "
+      "       round(extract(epoch from max(TH.atime) - min(TH.atime)) / 60) as duration  "
+      "from tickets T "
+      "       left join services S on T.service_githash = S.githash "
+      "       left join users U on T.user_id = U.id "
+      "       left join ticket_history TH on T.id = TH.ticket_id "
+      "where T.status != 'deleted' "
+      "group by T.id, T.status, U.email, service "
+      "order by T.id");
 
-    return query_as_reqfmt(qresult, ['id','user_id','service','status'])
+    return query_as_reqfmt(qresult, ['id','email','service','status','duration'])
 
 
 class AdminPurgeTicketsAPI(AdminAbstractAPI):

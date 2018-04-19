@@ -13,7 +13,8 @@ create table services
   githash char(40) not null primary key,
   version varchar(40) not null,
   shortdesc varchar(78),
-  json text
+  json text,
+  pingtime timestamp not null default current_timestamp
 );
 
 drop table if exists providers cascade;
@@ -137,5 +138,12 @@ create table ticket_history
   status ticket_status,
   atime timestamp not null default current_timestamp
 );
+
+/* This view presents the duration of each successful ticket */
+create or replace view success_ticket_duration as 
+  select T.service_githash, T1.ticket_id, T1.atime as endtime, T1.atime - max(T2.atime) as runtime 
+  from ticket_history T1, ticket_history T2, tickets T where T1.status='success' 
+       and T1.ticket_id = T2.ticket_id and T2.status='claimed' and T.id = T1.ticket_id 
+  group by T.service_githash, T1.ticket_id, T1.atime order by T1.ticket_id;
 
 
