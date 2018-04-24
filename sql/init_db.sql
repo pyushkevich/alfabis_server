@@ -14,13 +14,15 @@ create table services
   version varchar(40) not null,
   shortdesc varchar(78),
   json text,
-  pingtime timestamp not null default current_timestamp
+  pingtime timestamp not null default current_timestamp,
+  current boolean default true
 );
 
 drop table if exists providers cascade;
 create table providers
 (
-  name varchar(78) not null primary key
+  name varchar(78) not null primary key,
+  current boolean default true
 );
 
 drop table if exists provider_services;
@@ -28,7 +30,8 @@ create table provider_services
 (
   provider_name varchar(40) not null references providers(name),
   service_githash char(40) not null references services(githash),
-  primary key (provider_name, service_githash)
+  primary key (provider_name, service_githash),
+  current boolean default true
 );
 
 /*

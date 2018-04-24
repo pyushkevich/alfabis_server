@@ -226,6 +226,7 @@ class ServicesPage:
       "         select service_githash, count(id) "
       "         from tickets where status='ready' group by service_githash "
       "     ) W on W.service_githash = githash "
+      "where S.current = true "
       "order by n_success desc");
 
     # Parse through the results into something more readable
@@ -609,9 +610,11 @@ class CatalogLogic:
       raise web.badrequest()
 
     # Clear the database of provider and service tables
-    db.delete('provider_services', where='service_githash is not null')
-    db.delete('services', where='name is not null')
-    db.delete('providers', where='name is not null')
+    
+    # Mark all providers, services and provider-service relations as not current
+    db.query("update providers set current = false")
+    db.query("update services set current = false")
+    db.query("update provider_services set current = false")
 
     for pro in rcat.submodules:
       if pro.name.startswith('providers/'):
@@ -619,8 +622,10 @@ class CatalogLogic:
         # Get the name of the provider
         pname = os.path.basename(pro.name)
 
-        # Add the provider to the database
-        db.insert('providers', name=pname)
+        # If the provider does not exist, add them, otherwise mark them as current
+        db.query(
+          "insert into providers values($pname, true) "
+          "    on conflict (name) do update set current=true;", vars=locals());
 
         # Run over all the available services
         for q in pro.children():
@@ -631,18 +636,21 @@ class CatalogLogic:
 
             with db.transaction():
 
-              # Insert the actual service
-              db.insert('services',
-                        name = j['name'], 
-                        githash = q.hexsha,
-                        version = j['version'], 
-                        shortdesc = j['shortdesc'],
-                        json = json.dumps(j))
+              # Insert the actual service. If the service exists, mark it as current. We assume
+              # that the attributes of a service stay fixed if the githash has not changed, which
+              # is the basic assumption with using git!
+              jdump = json.dumps(j)
+              db.query(
+                "insert into services "
+                "    values ($j['name'], $q.hexsha, $j['version'], $j['shortdesc'], $jdump) "
+                "    on conflict (githash) do update set current = true ", vars = locals());
 
               # Assign the service to the provider
-              db.insert('provider_services',
-                        provider_name = pname,
-                        service_githash = q.hexsha)
+              db.query(
+                "insert into provider_services values($pname, $q.hexsha) "
+                "    on conflict (provider_name, service_githash) "
+                "    do update set current = true", vars=locals())
+
           except:
             print("Unexpected error:", sys.exc_info())
         
@@ -880,7 +888,17 @@ class OAuthCallbackAPI:
     raise web.redirect(sess.return_uri)
     
 
-class LoginAPI:
+class LoginAPI (AbstractAPI):
+
+  def response(self):
+    if 'format' in web.input() and web.input().format == 'json':
+      return json.dumps({ 'result': {'email' : sess.email} })
+    else:
+      return ("logged in as %s \n" % sess.email);
+
+  def GET(self):
+    self.check_auth()
+    return self.response()
 
   def POST(self):
 
@@ -900,7 +918,7 @@ class LoginAPI:
       new_token=os.urandom(24).encode('hex')
       db.update("users", where="passwd=$token", passwd = new_token, vars=locals())
 
-      return ("logged in as %s \n" % sess.email);
+      return self.response()
 
     else:
       sess.kill();
@@ -915,7 +933,7 @@ class ServicesAPI (AbstractAPI):
     
     self.check_auth()
 
-    qresult = db.select("services");
+    qresult = db.select("services", where='current=true');
     return query_as_reqfmt(qresult, ['name','githash','version','shortdesc'])
 
 
@@ -1051,6 +1069,15 @@ class TicketsAPI (TicketsAPIBase):
     if len(res_svc) != 1:
       self.raise_badrequest("Service %s is not available" % service_name)
 
+    # Make sure that the user is allowed to create more tickets
+    user_id = sess.user_id;
+    n_tickets = db.query("select count(id) from tickets where user_id=$user_id and status <> 'deleted'", 
+                         vars=locals())[0].count;
+    n_allowed = db.query("select max_tickets from users U, user_tiers T where U.id = $user_id and U.tier = T.tier",
+                         vars=locals())[0].max_tickets;
+    if(n_tickets >= n_allowed):
+      self.raise_badrequest("Maximum allowed number of open tickets (%d) exceeded." % n_allowed)
+
     # Create a new ticket
     ticket_id = db.insert("tickets",user_id=sess.user_id,service_githash=githash,status="init")
 
@@ -1103,6 +1130,7 @@ class TicketFileDownloadAPI (TicketsAPIBase):
     filename = TicketLogic(ticket_id).get_nth_file(area, file_index)
     web.header("Content-Disposition", "attachment; filename=\"%s\"" % os.path.basename(filename))
     web.header("Content-Type", "application/octet-stream")
+    web.header("Content-Length", os.path.getsize(filename))
     web.header("Content-transfer-encoding","binary")
     return open(filename, "rb").read()
 

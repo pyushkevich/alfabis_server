@@ -1,18 +1,16 @@
 $def with(auth_url=None, token=None)
-Title: DSS Token Request
-
-
+Title: Login to DSS
 
 
 $if session.loggedin == False:
-  Secret Token Request
+  Distributed Segmentation Services Login
   =====
-  You will need a **secret token** to access this system using ITK-SNAP command line tools. To generate a token, please authenticate yourself using one of the methods below:
+  Before using DSS, you need to authenticate yourself using your Google account. The system will then generate a **token** consisting of 40 numbers and letters that allows you to access the system through software tools like ITK-SNAP. 
 
   <a href="$(auth_url)" class="googlebutton" title="Login with Google"></a>
 
 $elif session.acceptterms == False:
-  Distributed Segmentation Service Terms of Use
+  Distributed Segmentation Services (DSS) Terms of Use
   =====
   You have authenticated as **$(session.email)**. You must accept the terms of service below before using the DSS system.
 
@@ -32,9 +30,11 @@ $elif session.acceptterms == False:
   </form>
 
 $else:
-  Secret Token
+  Your Login Token
   =====
-  You have authenticated as **$(session.email)**.  Your secret token is below. 
-  Copy and paste it into <code>itksnap-wt</code> or other DSS-compatible tool.
+  You have authenticated as **$(session.email)**.  Your login token is below. 
+  Copy and paste it into ITK-SNAP, <code>itksnap-wt</code> or another DSS-compatible tool. 
 
       $(token) 
+
+  For greater security, the token can only be used to login on a single device. When you login on other devices, a new token will need to be generated.

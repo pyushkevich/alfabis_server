@@ -1,6 +1,6 @@
 $def with(services)
 
-DSS Segmentation Service Listing
+DSS Segmentation Services Listing
 =====
 
 <style>

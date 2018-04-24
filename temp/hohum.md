@@ -1,8 +1,8 @@
 $def with(signed_in, log_message=None, auth_url=None)
-Title: Distributed Segmentation Service for ITK-SNAP
+Title: Distributed Segmentation Services for ITK-SNAP
 
 
-Distributed Segmentation Service for ITK-SNAP
+Distributed Segmentation Services for ITK-SNAP
 =====
 
 <div class="pure-g">
