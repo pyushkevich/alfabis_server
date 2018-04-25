@@ -163,10 +163,10 @@ class AcceptTermsRequest:
   def POST(self):
     if 'cb' in web.input() and web.input().cb == 'on':
       sess.acceptterms = True
-      raise web.redirect("/token")
+      raise web.seeother("/token")
     else:
       sess.acceptterms = False
-      raise web.redirect("/logout")
+      raise web.seeother("/logout")
 
 # Token request handler
 class TokenRequest:
@@ -200,7 +200,11 @@ class ServicesPage:
     
     # We must be logged in, but not much else
     if sess.loggedin is not True:
-      raise web.redirect("/")
+      raise web.seeother("/")
+
+    web.header('Cache-Control','no-cache, no-store, must-revalidate')
+    web.header('Pragma','no-cache')
+    web.header('Expires', 0)
 
     # Get a listing of services with details
     services = db.query(
@@ -885,7 +889,7 @@ class OAuthCallbackAPI:
     sess.loggedin = True
 
     # Redirect to the home page
-    raise web.redirect(sess.return_uri)
+    raise web.seeother(sess.return_uri)
     
 
 class LoginAPI (AbstractAPI):
@@ -1156,7 +1160,10 @@ class TicketStatusAPI (TicketsAPIBase):
     # Check if the current status is appropriate for the new status
     if new_status == "ready":
       with db.transaction():
-        return TicketLogic(ticket_id).set_status(new_status)
+        tl = TicketLogic(ticket_id)
+        rtn_status = tl.set_status(new_status)
+        tl.append_log("info", "Ticket received and queued for processing")
+        return rtn_status
 
     self.raise_badrequest("Changing ticket status to %s is not supported" % new_status)
 
@@ -1237,6 +1244,13 @@ class TicketDetailAPI (TicketsAPIBase):
       qr['progress'] = 1.0
     else:
       qr['progress'] = 0.0
+
+    # If the status is 'ready', report the queue position (global)
+    if qr['status'] == 'ready':
+      qresult = db.query(
+        "select count(*) from tickets where status='ready' and id <= $ticket_id", 
+        vars=locals())
+      qr['queue_position'] = qresult[0].count
 
     # User can request partial update since given log_id
     start_id=0
