@@ -39,6 +39,7 @@ urls = (
   r"/acceptterms", "AcceptTermsRequest",
   r"/logout", "LogoutPage",
   r"/services", "ServicesPage",
+  r"/admin", "AdminPage",
   r"/about", "AboutPage",
   r"/api/login", "LoginAPI",
   r"/api/oauth2cb", "OAuthCallbackAPI",
@@ -89,14 +90,14 @@ db = web.database(
 
 # Create the session object with database storate
 sess = web.session.Session(
-    app, web.session.DBStore(db, 'sessions'), 
-    initializer={'loggedin': False, 'acceptterms': False})
+  app, web.session.DBStore(db, 'sessions'), 
+  initializer={'loggedin': False, 'acceptterms': False, 'is_admin': False})
 
 # Configure the template renderer with session support
 render = web.template.render(
-    'temp/', 
-    globals={'markdown': markdown.markdown, 'session': sess}, 
-    cache=False);
+  'temp/', 
+  globals={'markdown': markdown.markdown, 'session': sess}, 
+  cache=False);
 
 # Configure the markdown to HTML converter (do we need this really? Why not HTML5?)
 md = markdown.Markdown(output_format='html4',
@@ -269,6 +270,19 @@ class ServicesPage:
       serv_data.append(s)
 
     return render_markdown("services_home", serv_data)
+
+
+
+class AdminPage:
+
+  def GET(self):
+    
+    # We must be logged in, but not much else
+    if sess.loggedin is not True or sess.is_admin is not True:
+      raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
+
+    return render_markdown("admin")
+
 
 class AboutPage:
 
@@ -608,6 +622,8 @@ class CatalogLogic:
   
   def rebuild(self):
 
+    print('rebuild called')
+
     # Scan the catalog directory for all providers
     rcat = Repo('catalog')
     if rcat.bare is True:
@@ -877,15 +893,19 @@ class OAuthCallbackAPI:
     # Create an account for the user with credential information
     res = db.select('users', where="email=$email", vars=locals())
     if len(res) > 0:
-      alfabis_id=res[0].id
+      stored_user_data = res[0]
+      alfabis_id = stored_user_data.id
+      is_admin = stored_user_data.sysadmin
     else:
       passwd=os.urandom(24).encode('hex')
-      db.insert('users', email=email, passwd=passwd, dispname=user_info.get("name"))
+      alfabis_id = db.insert('users', email=email, passwd=passwd, dispname=user_info.get("name"))
+      is_admin = False
 
     # Set the user information in the session
     sess.email = user_info.get('email')
     sess.name = user_info.get('name')
     sess.user_id = alfabis_id
+    sess.is_admin = is_admin
     sess.loggedin = True
 
     # Redirect to the home page
@@ -916,6 +936,7 @@ class LoginAPI (AbstractAPI):
       sess.loggedin = True
       sess.user_id = user_data.id
       sess.email = user_data.email
+      sess.is_admin = user_data.sysadmin
 
       # Now that the user has used the token, generate a new token (so that there
       # is no security risk from sharing tokens)
@@ -1677,7 +1698,7 @@ class AdminCatalogAPI(AdminAbstractAPI):
   
 class AdminCatalogRebuildAPI(AdminAbstractAPI):
 
-  def GET(self):
+  def POST(self):
     self.check_auth()
     cl = CatalogLogic()
     cl.rebuild()

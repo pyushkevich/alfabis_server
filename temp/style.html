@@ -2,7 +2,7 @@ $def with(text)
 
 <!DOCTYPE html>
 <html>
-<head>
+<head profile="http://www.w3.org/2005/10/profile">
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
@@ -19,6 +19,7 @@ $def with(text)
 	<!--<![endif]-->
 
   <!-- link rel="stylesheet" href="static/retro.css" -->
+  <link rel="icon" type="image/png" href="static/img/itksnap_favicon_32.png">
 </head>
 <body>
 
@@ -42,6 +43,11 @@ $def with(text)
                   </li>
 
                 <li class="pure-menu-item"><a href="/about" class="pure-menu-link">About</a></li>
+
+                $if session.loggedin and session.is_admin:
+                  <li class="pure-menu-item" class="menu-item-divided pure-menu-selected">
+                    <a href="/admin" class="pure-menu-link">Admin</a>
+                  </li>
 
                 $if session.loggedin:
                   <li class="pure-menu-item" class="menu-item-divided pure-menu-selected">
