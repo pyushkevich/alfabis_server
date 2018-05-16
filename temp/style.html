@@ -1,4 +1,15 @@
-$def with(text)
+$def with(text, ctx)
+
+
+$def mitem(path, text):
+  $if ctx['path'] == path:
+    <li class="pure-menu-item pure-menu-selected">
+  $else:
+    <li class="pure-menu-item">
+
+  <a href="$path" class="pure-menu-link">$text</a></li>
+
+
 
 <!DOCTYPE html>
 <html>
@@ -35,38 +46,44 @@ $def with(text)
           <a class="pure-menu-heading" href="#">ITK-SNAP DSS</a>
 
             <ul class="pure-menu-list">
-                <li class="pure-menu-item"><a href="/" class="pure-menu-link">Home</a></li>
+              $:mitem("/", "Home")
 
-                $if session.loggedin:
-                  <li class="pure-menu-item" class="menu-item-divided pure-menu-selected">
-                    <a href="/services" class="pure-menu-link">Services</a>
-                  </li>
+              $if session.loggedin:
+                $:mitem("/services", "Services")
 
-                <li class="pure-menu-item"><a href="/about" class="pure-menu-link">About</a></li>
+              $:mitem("/about", "About")
 
-                $if session.loggedin and session.is_admin:
-                  <li class="pure-menu-item" class="menu-item-divided pure-menu-selected">
-                    <a href="/admin" class="pure-menu-link">Admin</a>
-                  </li>
+              $if session.loggedin and session.is_admin:
+                $:mitem("/admin", "Admin")
 
-                $if session.loggedin:
-                  <li class="pure-menu-item" class="menu-item-divided pure-menu-selected">
-                    <a href="/logout" class="pure-menu-link">Sign Out</a>
-                  </li>
+              $if session.loggedin:
+                $:mitem("/logout", "Sign Out")
             </ul>
         </div>
     </div>
 
+    $if ctx['admin']:
+      <div class="header">
+        <div class="home-menu pure-menu pure-menu-horizontal">
+            <ul class="pure-menu-list">
+              $:mitem("/admintickets", "Tickets")
+              $:mitem("/admin", "Admin Tasks")
+            </ul>
+        </div>
+      </div>
+
     <div id="main">
+
 	  <!--
         <div class="header">
             <h1>Page Title</h1>
             <h2>A subtitle for your page goes here</h2>
 		</div> -->
-
+      <div class="content-wrapper">
         <div class="content">
 $:text
         </div>
+      </div>
     </div>
 </div>
 

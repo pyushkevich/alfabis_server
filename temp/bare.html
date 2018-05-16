@@ -1,0 +1,42 @@
+$def with(text, ctx)
+
+<!DOCTYPE html>
+<html>
+<head profile="http://www.w3.org/2005/10/profile">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>ITK-SNAP Distributed Segmentation Services</title>
+
+    <link rel="stylesheet" href="/static/pure/pure-min.css">    
+	<!--[if lte IE 8]>
+		<link rel="stylesheet" href="static/pure/layouts/side-menu-old-ie.css">
+	<![endif]-->
+	<!--[if gt IE 8]><!-->
+		<link rel="stylesheet" href="/static/pure/layouts/side-menu.css">
+    <link rel="stylesheet" href="/static/alfabis.css">
+    <link rel="stylesheet" href="/static/balloon.css">
+	<!--<![endif]-->
+
+  <!-- link rel="stylesheet" href="static/retro.css" -->
+  <link rel="icon" type="image/png" href="/static/img/itksnap_favicon_32.png">
+
+  <!-- This is for pretty printing code -->
+  <script src="https://rawgit.com/google/code-prettify/master/loader/run_prettify.js?autoload=true&amp;skin=sunburst&amp;lang=css" defer=""></script>
+</head>
+
+<body>
+
+<div id="layout">
+  <div class="content-wrapper">
+    <div class="content">
+      $:text
+    </div>
+  </div>
+</div>
+
+<script src="/static/pure/js/ui.js"></script>
+
+</body>
+</html>
+

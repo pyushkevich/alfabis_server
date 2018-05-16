@@ -40,6 +40,8 @@ urls = (
   r"/logout", "LogoutPage",
   r"/services", "ServicesPage",
   r"/admin", "AdminPage",
+  r"/admintickets", "AdminTicketsPage",
+  r"/admin/tickets/(\d+)/detail", "AdminTicketsDetailPage",
   r"/about", "AboutPage",
   r"/api/login", "LoginAPI",
   r"/api/oauth2cb", "OAuthCallbackAPI",
@@ -106,10 +108,29 @@ md = markdown.Markdown(output_format='html4',
 
 # A function to render a markdown template with parameters
 def render_markdown(page, *args):
-  print "wow"
+  # Render the page requested into a string
   text = getattr(render, page)(*args);
-  print text
-  return render.style(md.convert(unicode(text)));
+
+  # A context dict for menu rendering
+  ctx = {}
+  ctx['admin'] = web.ctx.path.startswith('/admin')
+  ctx['path'] = web.ctx.path
+
+  # Render the full page
+  return render.style(md.convert(unicode(text)), ctx);
+
+# Render markdown page without menus
+def render_markdown_nomenus(page, *args):
+  # Render the page requested into a string
+  text = getattr(render, page)(*args);
+
+  # A context dict for menu rendering
+  ctx = {}
+  ctx['admin'] = web.ctx.path.startswith('/admin')
+  ctx['path'] = web.ctx.path
+
+  # Render the full page
+  return render.bare(md.convert(unicode(text)), ctx);
 
 # Determine mime type from filename or return octet stream
 def guess_mimetype(filename):
@@ -282,6 +303,127 @@ class AdminPage:
       raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
 
     return render_markdown("admin")
+
+
+class AdminTicketsPage:
+
+  def format_date(self, dt):
+
+    n = datetime.datetime.now()
+    if n.year == dt.year:
+      if n.day == dt.day:
+        return dt.strftime("%H:%M");
+      return dt.strftime("%b %d  %H:%M");
+    return dt.strftime("%b %d %Y  %H:%M");
+
+  def format_delta(self, dt1, dt2):
+
+    if dt1 is None or dt2 is None:
+      return None
+
+    delta = dt2 - dt1
+    h = delta.seconds / 3600
+    m = (delta.seconds / 60) % 60
+    s = delta.seconds % 60
+
+    if h > 0:
+      return "%02d:%02d:%02d" % (h,m,s)
+    else:
+      return "%02d:%02d" % (m,s)
+
+
+  def GET(self):
+
+    # We must be logged in, but not much else
+    if sess.loggedin is not True or sess.is_admin is not True:
+      raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
+
+    # Get the listing of tickets, this is a hell of a query
+    q = db.query(
+        "select T.id, S.name, T.status, email, dispname, "
+        "       Tinit, Tclaimed, Tsuccess, Tfailed, Ttimeout, Tdeleted, progress "
+        "from tickets T "
+        "     left join users U on T.user_id = U.id "
+        "     left join services S on T.service_githash = S.githash "
+        "     left join (select ticket_id, "
+        "                       max(case when status='init' then atime else NULL end) as Tinit, "
+        "                       max(case when status='claimed' then atime else NULL end) as Tclaimed, "
+        "                       max(case when status='success' then atime else NULL end) as Tsuccess, "
+        "                       max(case when status='failed' then atime else NULL end) as Tfailed, "
+        "                       max(case when status='timeout' then atime else NULL end) as Ttimeout, "
+        "                       max(case when status='deleted' then atime else NULL end) as Tdeleted "
+        "                from ticket_history group by ticket_id) TH on TH.ticket_id = T.id "
+        "     left join (select ticket_id, sum(progress * (chunk_end - chunk_start)) as progress "
+        "                from ticket_progress group by ticket_id) P on P.ticket_id = T.id "
+        "order by T.id desc limit 100")
+
+    # Send this query to the web page
+    tix_data=[]
+    for row in q:
+      
+      # Orgaize the data for this ticket
+      T = {}
+      print row
+      T['id'] = row.id
+      T['service'] = row.name
+      T['status'] = row.status
+
+      # If the status is 'deleted', show the last useful status
+      if row.status == 'deleted':
+        T['deleted'] = True
+        T['status'] = 'failed' if row.tfailed is not None else (
+          'timeout' if row.ttimeout is not None else (
+            'success' if row.tsuccess is not None else 'aborted'))
+      else:
+        T['deleted'] = False
+        T['status'] = row.status
+                          
+      T['status_color'] = 'darkred' if T['status'] in ('failed','timeout') else (
+        'darkgreen' if T['status'] == 'success' else (
+          'goldenrod' if T['status'] == 'aborted' else 'gray'))
+                          
+      T['email'] = row.email
+      T['dispname'] = row.dispname
+      if len(T['dispname']) == 0:
+        T['dispname'] = T['email']
+      
+      T['T_init'] = self.format_date(row.tinit)
+      T['T_claim'] = self.format_delta(row.tinit, row.tclaimed)
+
+      # Figure out the end date
+      t_end = datetime.datetime.now();
+      for t_test in (row.tsuccess, row.tfailed, row.ttimeout, row.tdeleted):
+        if t_test is not None and t_test < t_end:
+          t_end = t_test
+
+      T['T_end'] = self.format_delta(row.tclaimed, t_end)
+      T['progress'] = row.progress
+      
+
+
+      tix_data.append(T)
+
+    return render_markdown("admin_tickets", tix_data)
+
+
+class AdminTicketsDetailPage:
+
+  def GET(self, ticket_id):
+
+    # We must be logged in, but not much else
+    if sess.loggedin is not True or sess.is_admin is not True:
+      raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
+
+    # Get the detail using the API
+    qr = TicketLogic(ticket_id).get_detail()
+
+    # Get formatted JSON
+    ticket_json = json.dumps(qr, default=my_json_converter, indent=4)
+
+    # Render the page
+    return render_markdown_nomenus("admin_ticket_detail", ticket_id, ticket_json)
+
+
 
 
 class AboutPage:
@@ -530,6 +672,54 @@ class TicketLogic:
 
     # Return a tuple of dbindex, hash, and filename
     return (res, ahash, afile)
+
+  # Get ticket detail in a JSON-dumpable structure
+  def get_detail(self):
+
+    # Initialize the query result
+    qr = {}
+
+    # Get the status of this ticket
+    qr['status'] = db.select('tickets', where='id=$self.ticket_id', vars=locals())[0].status;
+
+    # Depending on status, assign progress
+    if qr['status'] == 'claimed':
+      qr['progress'] = float(TicketLogic(self.ticket_id).total_progress())
+    elif qr['status'] in ('failed','success','timeout'):
+      qr['progress'] = 1.0
+    else:
+      qr['progress'] = 0.0
+
+    # If the status is 'ready', report the queue position (global)
+    if qr['status'] == 'ready':
+      qresult = db.query(
+        "select count(*) from tickets where status='ready' and id <= $self.ticket_id", 
+        vars=locals())
+      qr['queue_position'] = qresult[0].count
+
+    # User can request partial update since given log_id
+    start_id=0
+    if "since" in web.input():
+      start_id=web.input().since
+
+    # Get the logs for this ticket
+    qresult = TicketLogic(self.ticket_id).get_logs(start_id)
+
+    # Convert this query to an array
+    logs = query_as_array_of_dict(qresult, ['id','atime','category','attachments','message'])
+
+    # For each entry in the log array, get its attachments
+    for log_entry in logs:
+      if log_entry['attachments'] > 0:
+        qresult = TicketLogLogic(log_entry['id']).get_attachments()
+        log_entry['attachments'] = query_as_array_of_dict(qresult, ['id','description','mime_type','url'])
+      else:
+        log_entry['attachments'] = []
+
+    # Store the logs
+    qr['log'] = logs
+
+    return qr
 
 
 # Logic around ticket log messages. 
@@ -1041,7 +1231,7 @@ class TicketsAPIBase(AbstractAPI):
     self.check_auth()
 
     # Check if the ticket belongs to this user
-    if TicketLogic(ticket_id).check_consumer_access(sess.user_id, status_list) is False:
+    if sess.is_admin is not True and TicketLogic(ticket_id).check_consumer_access(sess.user_id, status_list) is False:
       self.raise_badrequest("Ticket %s not found for user %s" % (ticket_id,sess.user_id))
 
 
@@ -1253,47 +1443,7 @@ class TicketDetailAPI (TicketsAPIBase):
     self.check_ticket_access(ticket_id)
 
     # Initialize the query result
-    qr = {}
-
-    # Get the status of this ticket
-    qr['status'] = db.select('tickets', where='id=$ticket_id', vars=locals())[0].status;
-
-    # Depending on status, assign progress
-    if qr['status'] == 'claimed':
-      qr['progress'] = float(TicketLogic(ticket_id).total_progress())
-    elif qr['status'] in ('failed','success','timeout'):
-      qr['progress'] = 1.0
-    else:
-      qr['progress'] = 0.0
-
-    # If the status is 'ready', report the queue position (global)
-    if qr['status'] == 'ready':
-      qresult = db.query(
-        "select count(*) from tickets where status='ready' and id <= $ticket_id", 
-        vars=locals())
-      qr['queue_position'] = qresult[0].count
-
-    # User can request partial update since given log_id
-    start_id=0
-    if "since" in web.input():
-      start_id=web.input().since
-
-    # Get the logs for this ticket
-    qresult = TicketLogic(ticket_id).get_logs(start_id)
-
-    # Convert this query to an array
-    logs = query_as_array_of_dict(qresult, ['id','atime','category','attachments','message'])
-
-    # For each entry in the log array, get its attachments
-    for log_entry in logs:
-      if log_entry['attachments'] > 0:
-        qresult = TicketLogLogic(log_entry['id']).get_attachments()
-        log_entry['attachments'] = query_as_array_of_dict(qresult, ['id','description','mime_type','url'])
-      else:
-        log_entry['attachments'] = []
-
-    # Store the logs
-    qr['log'] = logs
+    qr = TicketLogic(ticket_id).get_detail()
 
     # Return the JSON for this data
     web.header('Content-Type','application/json')
