@@ -843,6 +843,7 @@ class CatalogLogic:
             f_json = open(os.path.join(q.abspath,'service.json'))
             j = json.load(f_json)
             f_json.close()
+            print('Registering %s' % q.abspath)
 
             with db.transaction():
 
@@ -852,7 +853,7 @@ class CatalogLogic:
               jdump = json.dumps(j)
               db.query(
                 "insert into services "
-                "    values ($j['name'], $q.hexsha, $j['version'], $j['shortdesc'], $jdump) "
+                "    values ($j['name'], $q.hexsha, $j['version'], left($j['shortdesc'],78), $jdump) "
                 "    on conflict (githash) do update set current = true ", vars = locals());
 
               # Assign the service to the provider
