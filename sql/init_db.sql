@@ -56,7 +56,7 @@ create table tickets
 (
   id serial PRIMARY KEY,
   user_id int references users(id) not null,
-  service_githash not null,
+  service_githash char(40) not null,
   status ticket_status
 );
 

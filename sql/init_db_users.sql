@@ -22,7 +22,7 @@ create table users (
   passwd text,
   dispname text not null,
   sysadmin boolean default false,
-  tier varchar(40) default 'guest' references user_tiers(tier);
+  tier varchar(40) default 'guest' references user_tiers(tier)
 );
 
 /* 
