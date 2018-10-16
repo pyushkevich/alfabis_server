@@ -41,6 +41,7 @@ urls = (
   r"/services", "ServicesPage",
   r"/admin", "AdminPage",
   r"/admintickets", "AdminTicketsPage",
+  r"/adminservices", "AdminServicesPage",
   r"/admin/tickets/(\d+)/detail", "AdminTicketsDetailPage",
   r"/about", "AboutPage",
   r"/api/login", "LoginAPI",
@@ -149,7 +150,9 @@ class OAuthHelper:
 
     self.flow = client.flow_from_clientsecrets(
         os.environ['ALFABIS_GOOGLE_CLIENTSECRET'],
-        scope='https://www.googleapis.com/auth/userinfo.email',
+        scope=[
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile'],
         redirect_uri=web.ctx.home+"/api/oauth2cb")
 
   def auth_url(self):
@@ -422,6 +425,51 @@ class AdminTicketsDetailPage:
 
     # Render the page
     return render_markdown_nomenus("admin_ticket_detail", ticket_id, ticket_json)
+
+
+class AdminServicesPage:
+
+  def GET(self):
+
+    # We must be logged in, but not much else
+    if sess.loggedin is not True or sess.is_admin is not True:
+      raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
+
+    # Query the list of providers
+    r_prov = db.select('providers', where='current is true', vars=locals())
+
+    # Create a dictionary of providers
+    pd = {}
+
+    # Go through query filling out provider info
+    for row_prov in r_prov:
+
+      # The name of the current provider
+      p_id = row_prov.name
+      
+      # Dictionary for this provider
+      pd[p_id] = {}
+
+      # Query the list of services for this provider
+      r_serv = db.query(
+        "select A.name, A.version, A.githash from services A, provider_services B "
+        "where A.githash = B.service_githash and B.current is TRUE and A.current is TRUE "
+        "      and B.provider_name = $p_id "
+        "order by A.name, A.version", vars = locals())
+
+      pd[p_id]['services'] = query_as_array_of_dict(r_serv, ['name','version','githash'])
+
+      # Query the list of users for this provider
+      r_users = db.query(
+        "select email,id,dispname,admin from users A, provider_access B "
+        "where A.id = B.user_id and B.provider=$p_id "
+        "order by email", vars=locals())
+
+      pd[p_id]['users'] = query_as_array_of_dict(r_users, ['email', 'id', 'dispname', 'admin'])
+
+    return render_markdown("admin_services", pd)
+
+
 
 
 
@@ -1089,6 +1137,7 @@ class OAuthCallbackAPI:
       is_admin = stored_user_data.sysadmin
     else:
       passwd=os.urandom(24).encode('hex')
+      print user_info
       alfabis_id = db.insert('users', email=email, passwd=passwd, dispname=user_info.get("name"))
       is_admin = False
 
