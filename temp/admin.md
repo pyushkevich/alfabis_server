@@ -32,21 +32,14 @@ DSS Administrator Home
 Maintenance Tasks
 -----
 
-<form class="pure-form" action="javascript:void(0);">
-    <fieldset>
-        <legend>Rebuild service catalog</legend>
-        <button type="Rebuild" class="pure-button pure-button-primary" onclick="RebuildCatalog()">Rebuild</button>
-    </fieldset>
-</form>
-
 <form class="pure-form" name="frm_purge" action="javascript:void(0);">
     <fieldset>
         <legend>Purge tickets</legend>
         <label for="days">Days:</label>
         <input type="number" name="days" min="1" max="7" value="7">
         <label for="all">
-            <input name="all" type="checkbox" value=off> Include open tickets
+            <input name="all" type="checkbox" value=off> Include open tickets</input>
         </label>
-        <button type="Rebuild" class="pure-button pure-button-primary" onclick="PurgeTickets()">Purge</button>
+        <button type="button" class="pure-button pure-button-primary" onclick="PurgeTickets()">Purge</button>
     </fieldset>
 </form>

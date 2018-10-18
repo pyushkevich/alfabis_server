@@ -1,0 +1,23 @@
+version: '3'
+services:
+  db:
+    build:
+      context: .
+      dockerfile: ./docker/db/Dockerfile
+  app:
+    build:
+      context: .
+      dockerfile: ./docker/web/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+    environment:
+      - POSTGRES_PORT_5432_TCP_ADDR=db
+      - POSTGRES_PORT_5432_TCP_PORT=5432
+      - ALFABIS_DATABASE_NAME=alfabis_db
+      - ALFABIS_DATABASE_USERNAME=alfabis_user
+      - ALFABIS_DATABASE_PASSWORD=
+      - ALFABIS_NOAUTH=1
+    working_dir: /app/alfabis_server
+    command: python app.py --server

@@ -13,12 +13,16 @@ import mimetypes
 import httplib2
 import time
 import datetime
+import argparse
+import tempfile
+import traceback
 from pprint import pprint
 from os import walk
 from os.path import basename
 from oauth2client import client
 from apiclient.discovery import build
 from git import Repo
+from git import Git
 
 # Needed for session support
 web.config.debug = False
@@ -70,9 +74,12 @@ urls = (
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
   r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI",
-  r"/api/admin/catalog","AdminCatalogAPI", 
-  r"/api/admin/catalog/rebuild","AdminCatalogRebuildAPI", 
+  r"/api/admin/providers","AdminProvidersAPI",
+  r"/api/admin/providers/([\w\-]+)/delete","AdminProviderDeleteAPI", 
   r"/api/admin/providers/([\w\-]+)/users","AdminProviderUsersAPI", 
+  r"/api/admin/providers/([\w\-]+)/users/(\d+)/delete","AdminProviderUsersDeleteAPI", 
+  r"/api/admin/providers/([\w\-]+)/services","AdminProviderServicesAPI", 
+  r"/api/admin/providers/([\w\-]+)/services/([a-f0-9]+)/delete","AdminProviderServicesDeleteAPI", 
   r"/api/admin/tickets/purge/(completed|all)","AdminPurgeTicketsAPI", 
   r"/api/admin/tickets","AdminTicketsAPI", 
   r"/blobs/([a-f0-9]{8})", "DirectDownloadAPI",
@@ -91,10 +98,35 @@ db = web.database(
   user=os.environ['ALFABIS_DATABASE_USERNAME'],
   pw=os.environ['ALFABIS_DATABASE_PASSWORD'])
 
-# Create the session object with database storate
-sess = web.session.Session(
-  app, web.session.DBStore(db, 'sessions'), 
-  initializer={'loggedin': False, 'acceptterms': False, 'is_admin': False})
+# Configure the session. By default, the session is initialized with nothing
+# but in no-auth mode, the session should be initialized as logged in with
+# user set 
+if "ALFABIS_NOAUTH" not in os.environ:
+
+  # Blank session
+  sess = web.session.Session(
+    app, web.session.DBStore(db, 'sessions'), 
+    initializer={'loggedin': False, 'acceptterms': False, 'is_admin': False})
+
+else:
+  # Make sure user exists, if not populate in the user table
+  new_token=os.urandom(24).encode('hex')
+  db.query(
+    "insert into users values(DEFAULT,'test@example.com',$new_token,"
+    "                         'Test User', TRUE, 'poweruser') "
+    "on conflict do nothing", vars=locals())
+
+  # Get the user id of the test user
+  user_id = db.select('users', where="email='test@example.com'")[0].id;
+
+  # Prepopulated session
+  sess = web.session.Session(
+    app, web.session.DBStore(db, 'sessions'), 
+    initializer={'loggedin': True, 'acceptterms': True, 'is_admin': True,
+                 'email' : 'test@example.com', 'user_id' : user_id})
+
+
+
 
 # Configure the template renderer with session support
 render = web.template.render(
@@ -142,7 +174,6 @@ def guess_mimetype(filename):
     mime_type="application/octet-stream"
   return mime_type
 
-
 # This class facilitates working with the Google OAuth2 API
 class OAuthHelper:
 
@@ -170,13 +201,28 @@ class OAuthHelper:
 
     return user_info
 
+# Single function to check whether the user is logged in
+def is_logged_in():
+  return sess.loggedin
+
+def is_logged_in_as_admin():
+  return sess.loggedin and sess.is_admin
+
+# Print session contents 
+def print_session():
+  print("*** Session Info ***")
+  print("  sess.loggedin = %d" % sess.loggedin)
+  print("  sess.is_admin = %d" % sess.is_admin)
+  print("  sess.email = %s" % sess.email)
+  print("  sess.acceptterms= %d" % sess.acceptterms)
+
 # Home Page handler
 class index:
   def GET(self):
 
     # Create the URL for authorization
     auth_url=None
-    if sess.loggedin == False:
+    if is_logged_in() == False:
       auth_url = OAuthHelper().auth_url()
 
     # The redirect URL for after authentication
@@ -201,7 +247,7 @@ class TokenRequest:
     # Create the URL for authorization
     auth_url=None
     token=None
-    if sess.loggedin == False:
+    if is_logged_in() == False:
       auth_url = OAuthHelper().auth_url()
     else:
       email = sess.email
@@ -224,7 +270,7 @@ class ServicesPage:
   def GET(self):
     
     # We must be logged in, but not much else
-    if sess.loggedin is not True:
+    if is_logged_in() is not True:
       raise web.seeother("/")
 
     web.header('Cache-Control','no-cache, no-store, must-revalidate')
@@ -302,7 +348,7 @@ class AdminPage:
   def GET(self):
     
     # We must be logged in, but not much else
-    if sess.loggedin is not True or sess.is_admin is not True:
+    if is_logged_in_as_admin() is not True:
       raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
 
     return render_markdown("admin")
@@ -338,7 +384,7 @@ class AdminTicketsPage:
   def GET(self):
 
     # We must be logged in, but not much else
-    if sess.loggedin is not True or sess.is_admin is not True:
+    if is_logged_in_as_admin() is not True:
       raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
 
     # Get the listing of tickets, this is a hell of a query
@@ -414,7 +460,7 @@ class AdminTicketsDetailPage:
   def GET(self, ticket_id):
 
     # We must be logged in, but not much else
-    if sess.loggedin is not True or sess.is_admin is not True:
+    if is_logged_in_as_admin() is not True:
       raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
 
     # Get the detail using the API
@@ -432,7 +478,7 @@ class AdminServicesPage:
   def GET(self):
 
     # We must be logged in, but not much else
-    if sess.loggedin is not True or sess.is_admin is not True:
+    if is_logged_in_as_admin() is not True:
       raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
 
     # Query the list of providers
@@ -854,65 +900,24 @@ class TicketLogLogic:
 
     return db.update("ticket_log", where="id = $self.log_id", state = status, vars=locals())
 
+# Logic around providers and services (which providers offer which service, etc)
+class ProviderServiceLogic:
 
-# Logic around the service/provider catalog
-class CatalogLogic:
-  
-  def rebuild(self):
-
-    print('rebuild called')
-
-    # Scan the catalog directory for all providers
-    rcat = Repo('catalog')
-    if rcat.bare is True:
-      raise web.badrequest()
-
-    # Clear the database of provider and service tables
+  # Check for any services that do not have a provider and mark them not current
+  def clean_orphaned_services(self):
     
-    # Mark all providers, services and provider-service relations as not current
-    db.query("update providers set current = false")
-    db.query("update services set current = false")
-    db.query("update provider_services set current = false")
+    # Get a list of service githashshes and whether the service has any providers
+    q = db.query(
+      "select S.githash, bool_or(PS.current) as any_prov "
+      "from provider_services PS, services S "
+      "where S.githash=PS.service_githash "
+      "GROUP BY S.githash", vars=locals())
 
-    for pro in rcat.submodules:
-      if pro.name.startswith('providers/'):
+    # For each service that has been 'orphaned', disable it
+    for qrow in q:
+      if qrow.any_prov is False:
+        db.update("services", where="githash=$qrow.githash", current=False, vars=locals())
 
-        # Get the name of the provider
-        pname = os.path.basename(pro.name)
-
-        # If the provider does not exist, add them, otherwise mark them as current
-        db.query(
-          "insert into providers values($pname, true) "
-          "    on conflict (name) do update set current=true;", vars=locals());
-
-        # Run over all the available services
-        for q in pro.children():
-          try:
-            f_json = open(os.path.join(q.abspath,'service.json'))
-            j = json.load(f_json)
-            f_json.close()
-            print('Registering %s' % q.abspath)
-
-            with db.transaction():
-
-              # Insert the actual service. If the service exists, mark it as current. We assume
-              # that the attributes of a service stay fixed if the githash has not changed, which
-              # is the basic assumption with using git!
-              jdump = json.dumps(j)
-              db.query(
-                "insert into services "
-                "    values ($j['name'], $q.hexsha, $j['version'], left($j['shortdesc'],78), $jdump) "
-                "    on conflict (githash) do update set current = true ", vars = locals());
-
-              # Assign the service to the provider
-              db.query(
-                "insert into provider_services values($pname, $q.hexsha) "
-                "    on conflict (provider_name, service_githash) "
-                "    do update set current = true", vars=locals())
-
-          except:
-            print("Unexpected error:", sys.exc_info())
-        
 
 # Logic around claiming tickets and scheduling
 class ClaimLogic:
@@ -1079,7 +1084,7 @@ class AbstractAPI(object):
 
   # Check if the user is authorized to be here
   def check_auth(self):
-    if sess.loggedin is False:
+    if is_logged_in() is False:
       self.raise_unauthorized("You are not logged in!")
 
   # Raise an unauthorized error with a message
@@ -1889,20 +1894,43 @@ class AdminAbstractAPI(AbstractAPI):
       self.raise_unauthorized("Insufficient privileges")
 
 
-class AdminCatalogAPI(AdminAbstractAPI):
+class AdminProvidersAPI(AdminAbstractAPI):
 
   def GET(self):
     self.check_auth()
-    return "You are the admin, indeed\n"
 
-  
-class AdminCatalogRebuildAPI(AdminAbstractAPI):
+    # Generate list of available providers
+    res = db.select('providers');
+    return query_as_reqfmt(res, ['name'])
 
   def POST(self):
     self.check_auth()
-    cl = CatalogLogic()
-    cl.rebuild()
-    return "Rebuilt service catalog"
+
+    # Create a new provider
+    pname = web.input().name
+
+    # If the provider does not exist, add them, otherwise mark them as current
+    db.query(
+      "insert into providers values($pname, true) "
+      "    on conflict (name) do update set current=true;", vars=locals());
+
+    # Return if successful
+    return "success"
+    
+
+class AdminProviderDeleteAPI(AdminAbstractAPI):
+
+  def GET(self, provider):
+    self.check_auth()
+
+    # Make the provider inactive
+    db.update("providers", where="name=$provider", current=False, vars=locals())
+
+    # Detach provider from all its services
+    db.update("provider_services", where="provider_name=$provider", current=False, vars=locals())
+    
+    # Clear the orphaned services
+    ProviderServiceLogic().clean_orphaned_services()
 
 
 class AdminProviderUsersAPI(AdminAbstractAPI):
@@ -1910,9 +1938,9 @@ class AdminProviderUsersAPI(AdminAbstractAPI):
   def GET(self,provider):
     self.check_auth()
     res = db.query(
-        "select U.email,P.admin from users U, provider_access P "
+        "select U.id, U.email,P.admin from users U, provider_access P "
         "where U.id = P.user_id and P.provider = $provider", vars=locals())
-    return query_as_reqfmt(res, ['email','admin'])
+    return query_as_reqfmt(res, ['id', 'email','admin'])
 
   def POST(self,provider):
     self.check_auth()
@@ -1931,6 +1959,111 @@ class AdminProviderUsersAPI(AdminAbstractAPI):
       db.insert('provider_access', user_id=user_id, provider=provider, admin=bool(isadmin))
 
     return 'Added user %s to provider %s' % (email, provider)
+
+class AdminProviderUsersDeleteAPI(AdminAbstractAPI):
+
+  def GET(self,provider,user_id):
+    self.check_auth()
+    with db.transaction():
+      db.delete('provider_access', where='user_id=$user_id and provider=$provider', vars=locals())
+
+
+class AdminProviderServicesAPI(AdminAbstractAPI):
+
+  # List all provider services
+  def GET(self, provider):
+    self.check_auth()
+    res = db.query(
+      "select * from services S, provider_services P "
+      "where S.githash = P.service_githash and P.provider_name = $provider "
+      "order by S.name, S.version", vars=locals())
+    return query_as_reqfmt(res, ['name','version','githash','shortdesc'])
+
+  # Add a service for a provider
+  def POST(self, provider):
+    self.check_auth()
+
+    # The repo must be supplied
+    repo_url = web.input().repo
+
+    # The reference can be a githash or a branch or a tag
+    ref_spec = web.input().ref
+
+    # Create temporary directory to check out repo
+    d_temp = tempfile.mkdtemp()
+    os.environ['GIT_TERMINAL_PROMPT'] = '0'
+
+    try:
+      # Fetch the remote repository
+      repo = Repo.clone_from(repo_url, d_temp)
+      repo.remotes.origin.fetch(ref_spec)
+      repo.git.checkout('FETCH_HEAD')
+
+      # Get the GitHash of the checkin
+      githash = repo.head.object.hexsha
+
+      # Read the json service descriptor
+      f_json = open(os.path.join(repo.working_dir,'service.json'))
+      j = json.load(f_json)
+      f_json.close()
+
+    except:
+      print(traceback.format_exc())
+      self.raise_badrequest("Error fetching Git repository")
+
+    # Check if the service clashes with an existing service. In that case
+    # we reject this update
+    q_clash=db.query(
+      "select count(githash) from services "
+      "where name=$j['name'] and version=$j['version'] and current=TRUE "
+      "      and githash <> $githash ", vars=locals())
+
+    if q_clash[0].count > 0:
+      self.raise_badrequest("A service with same name and version already exists")
+
+    # Perform checkin of the new repo
+    with db.transaction():
+
+      # Insert the actual service. If the service exists, mark it as current. We assume
+      # that the attributes of a service stay fixed if the githash has not changed, which
+      # is the basic assumption with using git!
+      jdump = json.dumps(j)
+      db.query(
+        "insert into services "
+        "    values ($j['name'], $githash, $j['version'], left($j['shortdesc'],78), $jdump) "
+        "    on conflict (githash) do update set current = true ", vars = locals());
+
+      # Assign the service to the provider
+      db.query(
+        "insert into provider_services values($provider, $githash) "
+        "    on conflict (provider_name, service_githash) "
+        "    do update set current = true", vars=locals())
+
+    # Create a copy of the repo in the datastore directory
+    saved_dir = 'datastore/services/%s' % githash
+    if not os.path.exists(saved_dir):
+      os.makedirs(saved_dir)
+      repo.clone(os.path.abspath(saved_dir))
+
+    # Finally, return the githash
+    return githash
+    
+    
+class AdminProviderServicesDeleteAPI(AdminAbstractAPI):
+
+  def GET(self, provider, githash):
+    self.check_auth()
+
+    # Clear the current flag in the provider_service relation (provider no longer offers service)
+    db.update("provider_services", 
+              where="service_githash=$githash and provider_name=$provider",
+              current=False, vars=locals())
+
+    # If there are any orphaned services as the result of this, remove them
+    ProviderServiceLogic().clean_orphaned_services()
+
+    # Success
+    return "success"
 
 
 class AdminTicketsAPI(AdminAbstractAPI):
@@ -1992,12 +2125,17 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
 
 
 
+# Argument parser
+parser = argparse.ArgumentParser()
+parser.add_argument("--server", help="Run as a stand-alone server", action="store_true")
+parser.add_argument("--port", help="Port on which to run stand-alone server", type=int, default=8080)
+pargs = parser.parse_args();
 
-
-
-
-
-
+# Which action to take
+if pargs.server:
+  sys.argv = [str(pargs.port)]
+  app.run()
+else:
+  application=app.wsgifunc()
 ###  if __name__ == '__main__' :
 ###  app.run()
-application=app.wsgifunc()

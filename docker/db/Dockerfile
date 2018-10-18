@@ -1,0 +1,21 @@
+# Base image for database
+FROM postgres:10
+
+# Make sure we have git
+RUN apt-get update
+RUN apt-get install -y git-core
+
+# Create workdir
+WORKDIR /app
+
+# Checkout the server 
+# RUN git clone -b sandbox https://github.com/pyushkevich/alfabis_server.git alfabis_server
+COPY . /app/alfabis_server
+
+# Generate a script that will initialize the database
+RUN echo "psql -c 'create database alfabis_db;'" > /docker-entrypoint-initdb.d/init.sh
+RUN echo "psql -c 'create user alfabis_user;'" >> /docker-entrypoint-initdb.d/init.sh
+RUN echo "psql -c 'grant all privileges on database alfabis_db to alfabis_user;'" >> /docker-entrypoint-initdb.d/init.sh
+RUN echo "psql -d alfabis_db -U alfabis_user -a -f /app/alfabis_server/sql/init_db_users.sql" >> /docker-entrypoint-initdb.d/init.sh
+RUN echo "psql -d alfabis_db -U alfabis_user -a -f /app/alfabis_server/sql/init_db.sql" >> /docker-entrypoint-initdb.d/init.sh
+
