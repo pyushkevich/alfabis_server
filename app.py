@@ -50,6 +50,7 @@ urls = (
   r"/about", "AboutPage",
   r"/api/login", "LoginAPI",
   r"/api/oauth2cb", "OAuthCallbackAPI",
+  r"/api/token", "TokenAPI",
   r"/api/services", "ServicesAPI",
   r"/api/services/([a-f0-9]+)/detail", "ServicesDetailAPI",
   r"/api/services/([a-f0-9]+)/stats", "ServicesStatsAPI",
@@ -258,6 +259,23 @@ class TokenRequest:
     sess.return_uri=web.ctx.home + "/token"
     return render_markdown("token", auth_url, token)
 
+
+# API-based token request: only works if you are already logged in
+class TokenAPI:
+
+  def GET(self):
+
+    # Must be logged in and accepted terms, otherwise you have to use the web page
+    if is_logged_in() is False or sess.acceptterms is False:
+      raise web.HTTPError("401 unauthorized", {}, "Unauthorized access")
+
+    # Retrieve the token
+    email = sess.email
+    res = db.select('users', where="email=$email", vars=locals())
+    token=res[0].passwd
+
+    # Return token
+    return token
 
 class LogoutPage:
 

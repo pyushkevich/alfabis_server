@@ -9,3 +9,4 @@ runme.sh
 runme_ssl.sh
 uwsgi.ini
 catalog
+*~

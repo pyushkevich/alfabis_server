@@ -12,6 +12,8 @@ services:
       - "8080:8080"
     depends_on:
       - db
+    links:
+      - db
     environment:
       - POSTGRES_PORT_5432_TCP_ADDR=db
       - POSTGRES_PORT_5432_TCP_PORT=5432
@@ -20,4 +22,15 @@ services:
       - ALFABIS_DATABASE_PASSWORD=
       - ALFABIS_NOAUTH=1
     working_dir: /app/alfabis_server
-    command: python app.py --server
+    command: ["/app/wait-for-it.sh", "db:5432", "--", "python", "app.py", "--server"]
+  service:
+    build:
+      context: .
+      dockerfile: ./docker/service/Dockerfile
+    depends_on:
+      - app
+    links:
+      - app
+    environment:
+      - DSS_URL=http://app:8080
+      - DSS_SERVICE_HASH=e0a316038e9cbe6a000e07c82758532a8863f51f

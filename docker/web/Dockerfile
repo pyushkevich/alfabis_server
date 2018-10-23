@@ -12,6 +12,10 @@ WORKDIR /app
 # RUN git clone -b sandbox https://github.com/pyushkevich/alfabis_server.git alfabis_server
 COPY . /app/alfabis_server/
 
+# Download the wait-for-it script
+ADD https://raw.githubusercontent.com/vishnubob/wait-for-it/master/wait-for-it.sh /app/wait-for-it.sh
+RUN chmod +x /app/wait-for-it.sh
+
 # Install the python dependencies
 RUN pip install --trusted-host pypi.python.org -r /app/alfabis_server/requirements.txt
 
