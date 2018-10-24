@@ -1,19 +1,21 @@
+*************************************
 Service Developer's Quick Start Guide
-=====================================
+*************************************
 
 This quick start guide walks you through creating a new service from scratch. We will first create a local DSS installation using Docker, and then create our own segmentation service.
 
-Prerequisites:
------
-* [ITK-SNAP](itksnap.org) 3.8 or later
-* [Docker](www.docker.com)
+Prerequisites
+=====
+* `ITK-SNAP <itksnap.org>`_ 3.8 or later
+* `Docker <www.docker.com>`_
 * Familiarity with Bash scripting 
 
 DSS Architecture Overview
------
+=====
 DSS architecture consists of three layers:
 
 .. image:: images/dss_arch.png
+    :width: 400px
 
 **client**
   A GUI or command-line tool that communicates with DSS over the web. Existing DSS clients are the ITK-SNAP GUI (after version 3.8) and the command-line tool **itksnap-wt** which is bundled with ITK-SNAP.
@@ -27,8 +29,11 @@ DSS architecture consists of three layers:
 This tutorial describes how to create your own service and hook it up to DSS.
 
 Running DSS locally
------
+===================
 The first step to creating your own DSS service is to launch a local DSS middleware layer. This will make it possible to test your service. 
+
+Set up DSS middleware
+---------------------
 
 Clone the DSS middlware Git repository::
 
@@ -39,7 +44,20 @@ The following command will create three Docker containers, one containing the SQ
 
     docker-compose up
 
-After running the command, you will see a lot of output in the terminal, colored by the container producing this output. To test if the container is working, connect to it using the web browser, using the URL <http://localhost:8080>
+After running the command, you will see a lot of output in the terminal, colored by the container producing this output. To test if the container is working, connect to it using the web browser, using the URL `http://localhost:8080`_
 
 .. note:: Port 8080 must be available on your host machine. If it is not, edit the file *docker-compose.yml* and change the first number under **ports** to the number of the port that is available to you. 
+
+When you visit `http://localhost:8080`_ you should see a functioning web page like the one captured below. The middleware server is set up in "ridiculously unsecure" test mode, where everyone accessing the server has administrator access. This is intended for testing the system on your own machine. You should **never use this server in a production setting**.
+
+.. figure:: images/dss_webpage.png
+    :scale: 50%
+
+Connect to DSS with ITK-SNAP GUI
+--------------------------------
+
+Next, connect to the server using ITK-SNAP. Open ITK-SNAP and in the main menu, select *Tools->Distributed Segmentation Service*. In the *Connect* tab, press the button **Manage...** and paste the URL of your middleware server (`http://localhost:8080`). 
+
+.. image:: images/dss_itksnap_addsvr.png
+
 
