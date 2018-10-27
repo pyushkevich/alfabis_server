@@ -1,0 +1,30 @@
+{
+  "name": "RegistrationExample",
+  "version": "0.1.0",
+  "keywords": [
+    "registration",
+    "longitudinal"
+  ],
+  "shortdesc": "DSS tutorial service (deformable registration)",
+  "longdesc": "Given a target image and a source image with labels, perform registration and map labels from the source image to the target image",
+  "tags": [
+    {
+      "name": "Target Image",
+      "type": "MainImage",
+      "hint": "The anatomical image onto which you want to warp the segmentation",
+      "required": true
+    },
+    {
+      "name": "Source Image",
+      "type": "OverlayImage",
+      "hint": "The anatomical image from which you want to warp the segmentation", 
+      "required": true
+    },
+    {
+      "name": "Source Labels",
+      "type": "OverlayImage",
+      "hint": "The segmentation of the source image",
+      "required": true
+    }
+  ]
+}    

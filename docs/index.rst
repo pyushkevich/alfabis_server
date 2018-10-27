@@ -10,16 +10,15 @@ ITK-SNAP Distributed Segmentation Service (DSS) Documentation
    :maxdepth: 2
    :caption: Contents:
 
+   user_quick_start
    service_quick_start
+   reference
 
 
 What is ITK-SNAP DSS?
 ---------------------
 DSS stands for *Distributed Segmentation Services*. It is an architecture that allows medical image segmentation tasks to be implemented as services on the Internet. These services can be easily accessed via interactive software like ITK-SNAP and using a thin command-line client. This documentation is focused on algorithm developers interested in making their tools available through the service.
 
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+.. image:: images/dss_arch.png
+    :width: 60%
+    :align: center

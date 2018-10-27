@@ -1619,7 +1619,7 @@ class ProviderServicesAPI (ProviderAPIBase):
         "select S.name,S.version,S.githash,PA.provider "
         "from services S, provider_access PA, provider_services PS "
         "where S.githash = PS.service_githash and PA.provider = PS.provider_name "
-        "  and PA.user_id = $user_id",
+        "  and PA.user_id = $user_id and S.current = TRUE",
         vars=locals());
 
     return query_as_reqfmt(qresult, ['name','version','githash','provider'])
@@ -1993,7 +1993,7 @@ class AdminProviderServicesAPI(AdminAbstractAPI):
     self.check_auth()
     res = db.query(
       "select * from services S, provider_services P "
-      "where S.githash = P.service_githash and P.provider_name = $provider "
+      "where S.githash = P.service_githash and P.provider_name = $provider and S.current = TRUE "
       "order by S.name, S.version", vars=locals())
     return query_as_reqfmt(res, ['name','version','githash','shortdesc'])
 
@@ -2020,6 +2020,11 @@ class AdminProviderServicesAPI(AdminAbstractAPI):
       # Get the GitHash of the checkin
       githash = repo.head.object.hexsha
 
+    except:
+      print(traceback.format_exc())
+      self.raise_badrequest("Error fetching Git repository")
+
+    try:
       # Read the json service descriptor
       f_json = open(os.path.join(repo.working_dir,'service.json'))
       j = json.load(f_json)
@@ -2027,7 +2032,7 @@ class AdminProviderServicesAPI(AdminAbstractAPI):
 
     except:
       print(traceback.format_exc())
-      self.raise_badrequest("Error fetching Git repository")
+      self.raise_badrequest("Error parsing service.json file")
 
     # Check if the service clashes with an existing service. In that case
     # we reject this update
