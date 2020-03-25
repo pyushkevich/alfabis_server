@@ -40,6 +40,7 @@ Set up DSS middleware
 Clone the DSS middlware Git repository::
 
     git clone https://github.com/pyushkevich/alfabis_server
+    git checkout sandbox
     cd alfabis_server
     
 The following command will create three Docker containers, one containing the SQL database for the middleware layer, another running the middleware web application, and the third running an example DSS service (a simple algorithm that crops out the neck in 3D MRI scans).::

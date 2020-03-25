@@ -658,16 +658,26 @@ class TicketLogic:
         "from tickets as T "
         "where S.githash = T.service_githash and T.id = $self.ticket_id", vars=locals());
 
-      # Try to update the progress line
-      n = db.update("ticket_progress", 
-        where="ticket_id = $self.ticket_id and chunk_start=$chunk_start and chunk_end=$chunk_end", 
-        progress = progress, vars=locals())
+      # If progress value inside of the chunk is zero, this triggers an update where all values
+      # inside of the chunk are deleted, and no further action is taken
+      if float(progress) == 0.0:
 
-      # If nothing got updated, this means we need to insert
-      if n == 0:
-        db.insert("ticket_progress", 
-          ticket_id=self.ticket_id, chunk_start=chunk_start,
-          chunk_end=chunk_end, progress=progress)
+        nd = db.delete("ticket_progress",
+	  where="ticket_id = $self.ticket_id and chunk_start >= $chunk_start and chunk_end <= $chunk_end",
+	  vars=locals())
+
+      else:
+
+        # Try to update the progress line
+        n = db.update("ticket_progress", 
+          where="ticket_id = $self.ticket_id and chunk_start=$chunk_start and chunk_end=$chunk_end", 
+          progress = progress, vars=locals())
+
+        # If nothing got updated, this means we need to insert
+        if n == 0:
+          db.insert("ticket_progress", 
+            ticket_id=self.ticket_id, chunk_start=chunk_start,
+            chunk_end=chunk_end, progress=progress)
 
   # Get the file directory for given area
   def get_filedir(self, area):
