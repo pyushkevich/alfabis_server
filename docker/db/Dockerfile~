@@ -12,11 +12,13 @@ WORKDIR /app
 # RUN git clone -b sandbox https://github.com/pyushkevich/alfabis_server.git alfabis_server
 COPY . /app/alfabis_server
 
+# Set the environment for postgres
+ENV POSTGRES_HOST_AUTH_METHOD=trust
+
 # Generate a script that will initialize the database
 RUN echo "psql -c 'create database alfabis_db;'" > /docker-entrypoint-initdb.d/init.sh
 RUN echo "psql -c 'create user alfabis_user;'" >> /docker-entrypoint-initdb.d/init.sh
 RUN echo "psql -c 'grant all privileges on database alfabis_db to alfabis_user;'" >> /docker-entrypoint-initdb.d/init.sh
 RUN echo "psql -d alfabis_db -U alfabis_user -a -f /app/alfabis_server/sql/init_db_users.sql" >> /docker-entrypoint-initdb.d/init.sh
 RUN echo "psql -d alfabis_db -U alfabis_user -a -f /app/alfabis_server/sql/init_db.sql" >> /docker-entrypoint-initdb.d/init.sh
-RUN echo "psql -d alfabis_db -U alfabis_user -c \"insert into users values(0,'test@example.com',NULL,'TestUser',TRUE,'poweruser');\"" >> /docker-entrypoint-initdb.d/init.sh
 
