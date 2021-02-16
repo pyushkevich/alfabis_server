@@ -2,6 +2,7 @@ web.py>=0.38
 markdown
 psycopg2-binary
 httplib2
+rsa==3.4.2
 oauth2client
 google-api-python-client
 gitpython
