@@ -1,7 +1,7 @@
 # Use official Python as parent image
-FROM python:2.7-slim
+FROM python:3.9-slim
 
-LABEL version="3.8.0-beta"
+LABEL version="3.8.0"
 LABEL maintainer="pyushkevich@gmail.com"
 LABEL description="ITK-SNAP docker container"
 
