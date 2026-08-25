@@ -1,4 +1,4 @@
-version: '3'
+# version: '3'
 services:
   app:
     build:
@@ -7,15 +7,24 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - ALFABIS_SQLITE_PATH=/app/data/alfabis.sqlite3
+    #  - ALFABIS_SQLITE_PATH=/app/data/alfabis.sqlite3
       - ALFABIS_NOAUTH=1
-    volumes:
-      - alfabis-data:/app/data
-    working_dir: /app/alfabis_server
+    #volumes:
+    #  - alfabis-data:/app/data
+    #working_dir: /app/alfabis_server
     # Initialize the SQLite schema only if the database file doesn't exist yet,
     # so restarting the container doesn't wipe a persistent volume's data.
-    command: ["sh", "-c", "test -f \"$ALFABIS_SQLITE_PATH\" || sqlite3 \"$ALFABIS_SQLITE_PATH\" < sql/init_db_sqlite.sql; exec python app.py --server"]
+    # command: ["sh", "-c", "test -f \"$ALFABIS_SQLITE_PATH\" || sqlite3 \"$ALFABIS_SQLITE_PATH\" < sql/init_db_sqlite.sql; exec python app.py --server"]
   service:
+    # docker/service/Dockerfile installs an x86_64-only ITK-SNAP release
+    # tarball on top of python:3.12-slim; on Apple Silicon that image would
+    # otherwise build natively as arm64 with a foreign x86_64 binary dropped
+    # in, which is what breaks Rosetta translation. Pinning the whole
+    # container to amd64 keeps the base image and the itksnap binary on the
+    # same architecture, so Docker Desktop's Rosetta emulation applies
+    # consistently. Requires Docker Desktop's "Use Rosetta for x86_64/amd64
+    # emulation on Apple Silicon" setting enabled (on by default).
+    platform: linux/amd64
     build:
       context: .
       dockerfile: ./docker/service/Dockerfile
