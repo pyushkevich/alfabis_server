@@ -250,5 +250,9 @@ DirectDownloadAPI
 
 /blobs/([a-f0-9]{32})
 ---------------------
-DirectDownloadAP
+DirectDownloadAPI
+
+/static/(.*)
+------------
+StaticFileAPI: serves the server's bundled CSS/JS/image assets (used by the HTML pages above). No authentication required.
 

@@ -1,29 +1,34 @@
-version: '3'
+# version: '3'
 services:
-  db:
-    build:
-      context: .
-      dockerfile: ./docker/db/Dockerfile
   app:
     build:
       context: .
       dockerfile: ./docker/web/Dockerfile
     ports:
       - "8080:8080"
-    depends_on:
-      - db
-    links:
-      - db
     environment:
-      - POSTGRES_PORT_5432_TCP_ADDR=db
-      - POSTGRES_PORT_5432_TCP_PORT=5432
-      - ALFABIS_DATABASE_NAME=alfabis_db
-      - ALFABIS_DATABASE_USERNAME=alfabis_user
-      - ALFABIS_DATABASE_PASSWORD=
       - ALFABIS_NOAUTH=1
-    working_dir: /app/alfabis_server
-    command: ["/app/wait-for-it.sh", "db:5432", "--", "python", "app.py", "--server"]
+    volumes:
+      # Bind-mount the host's ./datastore onto the same path itksnap-dss-server
+      # already defaults to inside the container (datastore/, relative to
+      # its WORKDIR) -- the database and uploaded ticket files land in a
+      # folder visible on the host, instead of the container's ephemeral
+      # filesystem, and restarting/rebuilding the container doesn't lose
+      # data. Auto-init (itksnap_dss_server/db.py) creates and initializes
+      # the database here on first run if it isn't already present.
+      - ./datastore:/app/alfabis_server/datastore
+    # No command override needed: the image's CMD (itksnap-dss-server
+    # --server) already does the right thing.
   service:
+    # docker/service/Dockerfile installs an x86_64-only ITK-SNAP release
+    # tarball on top of python:3.12-slim; on Apple Silicon that image would
+    # otherwise build natively as arm64 with a foreign x86_64 binary dropped
+    # in, which is what breaks Rosetta translation. Pinning the whole
+    # container to amd64 keeps the base image and the itksnap binary on the
+    # same architecture, so Docker Desktop's Rosetta emulation applies
+    # consistently. Requires Docker Desktop's "Use Rosetta for x86_64/amd64
+    # emulation on Apple Silicon" setting enabled (on by default).
+    platform: linux/amd64
     build:
       context: .
       dockerfile: ./docker/service/Dockerfile
