@@ -49,7 +49,12 @@ parser.add_argument("--noauth", action="store_true", default="ALFABIS_NOAUTH" in
 parser.add_argument("--google-clientsecret", default=os.environ.get('ALFABIS_GOOGLE_CLIENTSECRET'),
   help="Path to the Google OAuth2 client_secret.json, required for browser login "
        "[env: ALFABIS_GOOGLE_CLIENTSECRET]")
-pargs = parser.parse_args()
+
+# parse_known_args (not parse_args) so that when this file is imported as a
+# WSGI module -- e.g. by uWSGI, which leaves its OWN launch flags (--http,
+# --module, etc.) in sys.argv -- argparse doesn't choke on flags it doesn't
+# own and abort the worker at import time.
+pargs, _unused_args = parser.parse_known_args()
 
 # Needed for session support
 web.config.debug = False
@@ -142,8 +147,10 @@ sqlite_path = pargs.sqlite_path
 # os.makedirs) -- so the default path fails outright the first time the app is
 # run somewhere that doesn't already have a datastore/ directory.
 sqlite_dir = os.path.dirname(sqlite_path)
-if sqlite_dir and not os.path.exists(sqlite_dir):
-  os.makedirs(sqlite_dir)
+if sqlite_dir:
+  # exist_ok=True: multiple uWSGI/gunicorn worker processes can hit this at
+  # once on startup, and the plain exists-check-then-makedirs above raced.
+  os.makedirs(sqlite_dir, exist_ok=True)
 
 db = web.database(dbn='sqlite', db=sqlite_path, timeout=5.0)
 
