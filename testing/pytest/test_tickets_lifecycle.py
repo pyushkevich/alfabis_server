@@ -155,7 +155,7 @@ def test_max_open_tickets_enforced(server, provider_setup):
     server.seed_user("guestlimit@example.com", token, tier="guest")
     sess = server.login(token)
 
-    # guest tier allows 10 open tickets (itksnap_dss/sql/init_db_sqlite.sql)
+    # guest tier allows 10 open tickets (itksnap_dss_server/sql/init_db_sqlite.sql)
     for _ in range(10):
         r = sess.post(server.base_url + "/api/tickets", data={"githash": githash})
         assert r.status_code == 200

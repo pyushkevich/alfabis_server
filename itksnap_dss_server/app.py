@@ -136,8 +136,8 @@ app = web.application(urls, globals())
 # test harness, which points this at a temp file per test run). Connection
 # setup, PRAGMAs, and auto-initializing the schema from the bundled
 # sql/init_db_sqlite.sql if the database is missing/empty all live in
-# itksnap_dss.db -- see that module for details.
-from itksnap_dss import db as _db
+# itksnap_dss_server.db -- see that module for details.
+from itksnap_dss_server import db as _db
 sqlite_path = pargs.sqlite_path
 db = _db.connect(sqlite_path)
 
@@ -177,11 +177,11 @@ else:
 
 
 # Configure the template renderer with session support. Templates are
-# bundled package data (itksnap_dss/templates/), resolved via
+# bundled package data (itksnap_dss_server/templates/), resolved via
 # importlib.resources rather than a path relative to the process's CWD --
 # CWD-relative resolution here previously caused a real bug (templates
 # failed to load when the process wasn't started from this exact directory).
-_templates_dir = str(importlib.resources.files('itksnap_dss') / 'templates')
+_templates_dir = str(importlib.resources.files('itksnap_dss_server') / 'templates')
 render = web.template.render(
   _templates_dir,
   globals={'markdown': markdown.markdown, 'session': sess},
@@ -1976,7 +1976,7 @@ class ProviderTicketProgressAPI (ProviderAPIBase):
 class StaticFileAPI:
 
   def GET(self, relpath):
-    static_root = pathlib.Path(str(importlib.resources.files('itksnap_dss') / 'static')).resolve()
+    static_root = pathlib.Path(str(importlib.resources.files('itksnap_dss_server') / 'static')).resolve()
     target = (static_root / relpath).resolve()
 
     # Guard against path traversal (e.g. /static/../../../etc/passwd)
@@ -2265,7 +2265,7 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
 
 
 
-# itksnap_dss.cli:main calls this to actually run the stand-alone dev server
+# itksnap_dss_server.cli:main calls this to actually run the stand-alone dev server
 # (pargs was parsed at the top of this file, alongside the rest of the
 # command-line configuration, since it must exist before any of the
 # module-level setup above -- db connect, session init, route table -- runs).
@@ -2297,7 +2297,7 @@ def main_server():
   # directly and never calls main_server() at all.
 
 # Exposed at import time (not inside main_server()) so a WSGI server can do
-# `module = itksnap_dss.app:application` with zero function calls, exactly
-# as before this file moved into a package.
+# `module = itksnap_dss_server.app:application` with zero function calls,
+# exactly as before this file moved into a package.
 if not pargs.server:
   application = app.wsgifunc()

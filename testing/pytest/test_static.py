@@ -1,9 +1,9 @@
 """
-Static asset serving (itksnap_dss.app.StaticFileAPI). Templates reference
-CSS/JS/images under /static/... . web.py's built-in dev server has its own
-automatic /static/ file serving, but it's CWD-based and gets disabled in
-favor of this route -- see the comment on StaticMiddleware in
-itksnap_dss/app.py's main_server() for why.
+Static asset serving (itksnap_dss_server.app.StaticFileAPI). Templates
+reference CSS/JS/images under /static/... . web.py's built-in dev server
+has its own automatic /static/ file serving, but it's CWD-based and gets
+disabled in favor of this route -- see the comment on StaticMiddleware in
+itksnap_dss_server/app.py's main_server() for why.
 """
 import requests
 

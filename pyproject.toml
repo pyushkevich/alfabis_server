@@ -1,5 +1,5 @@
 [project]
-name = "itksnap-dss"
+name = "itksnap-dss-server"
 version = "0.1.0"
 authors = [
   { name = "Paul Yushkevich", email = "pyushkevich@gmail.com" },
@@ -34,17 +34,17 @@ test = [
 Homepage = "https://github.com/pyushkevich/alfabis_server"
 
 [project.scripts]
-itksnap-dss = "itksnap_dss.cli:main"
+itksnap-dss-server = "itksnap_dss_server.cli:main"
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["itksnap_dss"]
+packages = ["itksnap_dss_server"]
 
 [tool.setuptools.package-data]
-itksnap_dss = [
+itksnap_dss_server = [
     "sql/*.sql",
     "sql/deltas/*.sql",
     "sql/deltas/*.md",

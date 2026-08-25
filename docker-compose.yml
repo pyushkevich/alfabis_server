@@ -9,16 +9,16 @@ services:
     environment:
       - ALFABIS_NOAUTH=1
     volumes:
-      # Bind-mount the host's ./datastore onto the same path itksnap-dss
+      # Bind-mount the host's ./datastore onto the same path itksnap-dss-server
       # already defaults to inside the container (datastore/, relative to
       # its WORKDIR) -- the database and uploaded ticket files land in a
       # folder visible on the host, instead of the container's ephemeral
       # filesystem, and restarting/rebuilding the container doesn't lose
-      # data. Auto-init (itksnap_dss/db.py) creates and initializes the
-      # database here on first run if it isn't already present.
+      # data. Auto-init (itksnap_dss_server/db.py) creates and initializes
+      # the database here on first run if it isn't already present.
       - ./datastore:/app/alfabis_server/datastore
-    # No command override needed: the image's CMD (itksnap-dss --server)
-    # already does the right thing.
+    # No command override needed: the image's CMD (itksnap-dss-server
+    # --server) already does the right thing.
   service:
     # docker/service/Dockerfile installs an x86_64-only ITK-SNAP release
     # tarball on top of python:3.12-slim; on Apple Silicon that image would

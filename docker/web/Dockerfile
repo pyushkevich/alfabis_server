@@ -13,7 +13,7 @@ WORKDIR /app
 # RUN git clone -b sandbox https://github.com/pyushkevich/alfabis_server.git alfabis_server
 COPY . /app/alfabis_server/
 
-# itksnap_dss's default --datastore-root is a relative path, resolved against
+# itksnap_dss_server's default --datastore-root is a relative path, resolved against
 # the process's CWD (by design -- it's runtime user data, not package data),
 # so the process still needs to run from here.
 WORKDIR /app/alfabis_server
@@ -27,13 +27,13 @@ RUN pip install --trusted-host pypi.python.org .
 EXPOSE 8080
 
 # No build-time DB bake step, and no ALFABIS_SQLITE_PATH override here --
-# itksnap-dss's own default (datastore/alfabis.sqlite3, relative to the
-# WORKDIR above) is used as-is, same as running it outside Docker. That
+# itksnap-dss-server's own default (datastore/alfabis.sqlite3, relative to
+# the WORKDIR above) is used as-is, same as running it outside Docker. That
 # directory is auto-created and the schema auto-initialized on first
-# startup if the file doesn't exist yet (see itksnap_dss/db.py).
+# startup if the file doesn't exist yet (see itksnap_dss_server/db.py).
 # docker-compose.yml bind-mounts the host's ./datastore onto it, so the
 # database and uploaded ticket files land in a folder visible on the host
 # instead of the container's ephemeral filesystem.
 
 # Run the server (SQLite -- no separate database service to wait for)
-CMD ["itksnap-dss", "--server"]
+CMD ["itksnap-dss-server", "--server"]

@@ -1,5 +1,5 @@
 """
-Database connection setup for the itksnap-dss server: opens the SQLite
+Database connection setup for the itksnap-dss-server: opens the SQLite
 connection, applies per-connection PRAGMAs, and auto-initializes the schema
 from the bundled sql/init_db_sqlite.sql if the database file is missing or
 not yet initialized (i.e. has no `users` table).
@@ -14,9 +14,9 @@ import web
 
 def _schema_sql():
     """Return the bundled schema SQL as text (package data, not a filesystem
-    path -- works the same whether itksnap_dss was installed editable or as
-    a real, non-editable wheel/sdist install)."""
-    return (importlib.resources.files("itksnap_dss") / "sql" / "init_db_sqlite.sql").read_text()
+    path -- works the same whether itksnap_dss_server was installed editable
+    or as a real, non-editable wheel/sdist install)."""
+    return (importlib.resources.files("itksnap_dss_server") / "sql" / "init_db_sqlite.sql").read_text()
 
 
 def connect(sqlite_path):
@@ -67,7 +67,7 @@ def connect(sqlite_path):
         db.query("PRAGMA journal_mode = DELETE")
     except sqlite3.OperationalError as e:
         sys.exit(
-            "itksnap-dss: could not open SQLite database at '%s': %s\n"
+            "itksnap-dss-server: could not open SQLite database at '%s': %s\n"
             "(Set ALFABIS_SQLITE_PATH to point at a writable database file.)"
             % (sqlite_path, e)
         )
@@ -92,7 +92,7 @@ def _ensure_schema(db, sqlite_path):
     # flush=True: stdout is block-buffered (not line-buffered) when it isn't
     # a tty -- e.g. under Docker/uWSGI -- so without this the message can sit
     # unflushed in the buffer instead of showing up in container/service logs.
-    print("itksnap-dss: initializing new SQLite database at '%s'" % sqlite_path, flush=True)
+    print("itksnap-dss-server: initializing new SQLite database at '%s'" % sqlite_path, flush=True)
     # db.ctx.db is the current thread's already-open, PRAGMA-configured
     # connection (opened lazily by the PRAGMA journal_mode query above) --
     # reuse it rather than opening a second one, which needs web.py's

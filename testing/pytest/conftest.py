@@ -1,17 +1,18 @@
 """
-Docker-free integration test harness for the itksnap-dss (ITK-SNAP DSS) server.
+Docker-free integration test harness for the itksnap-dss-server (ITK-SNAP DSS) server.
 
-Starts `python -m itksnap_dss --server` as a plain local subprocess against a
-temp SQLite file and a temp datastore directory -- no Postgres, no Docker.
-The SQLite file is intentionally left non-existent; the server auto-creates
-and initializes it on startup (itksnap_dss.db), so every test run also
-exercises that auto-init path. Users are seeded directly via sqlite3 (not
-through OAuth, which is out of scope for this suite -- see the project
-plan). The server runs WITHOUT ALFABIS_NOAUTH so the real token-login path
-(the one itksnap-wt / dss_daemon.sh actually use) is exercised.
+Starts `python -m itksnap_dss_server --server` as a plain local subprocess
+against a temp SQLite file and a temp datastore directory -- no Postgres, no
+Docker. The SQLite file is intentionally left non-existent; the server
+auto-creates and initializes it on startup (itksnap_dss_server.db), so every
+test run also exercises that auto-init path. Users are seeded directly via
+sqlite3 (not through OAuth, which is out of scope for this suite -- see the
+project plan). The server runs WITHOUT ALFABIS_NOAUTH so the real
+token-login path (the one itksnap-wt / dss_daemon.sh actually use) is
+exercised.
 
 Requires the package to be installed (editable is fine: `pip install -e .`)
-so `python -m itksnap_dss` resolves.
+so `python -m itksnap_dss_server` resolves.
 """
 import os
 import signal
@@ -100,7 +101,7 @@ def server(tmp_path_factory):
     env.pop("ALFABIS_GOOGLE_CLIENTSECRET", None)  # OAuth routes are out of scope, never hit
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "itksnap_dss", "--server", "--port", str(port)],
+        [sys.executable, "-m", "itksnap_dss_server", "--server", "--port", str(port)],
         cwd=REPO_ROOT,
         env=env,
         stdout=subprocess.PIPE,
