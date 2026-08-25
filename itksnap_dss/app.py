@@ -4,6 +4,7 @@ import markdown
 import json
 import os
 import importlib.resources
+import pathlib
 import shutil
 import hashlib
 import csv
@@ -123,7 +124,8 @@ urls = (
   r"/api/admin/tickets/purge/(completed|all)","AdminPurgeTicketsAPI", 
   r"/api/admin/tickets","AdminTicketsAPI", 
   r"/blobs/([a-f0-9]{8})", "DirectDownloadAPI",
-  r"/blobs/([a-f0-9]{32})", "DirectDownloadAPI"
+  r"/blobs/([a-f0-9]{32})", "DirectDownloadAPI",
+  r"/static/(.*)", "StaticFileAPI",
   )
 
 # Create the web app
@@ -1960,6 +1962,31 @@ class ProviderTicketProgressAPI (ProviderAPIBase):
     return "success";
 
 
+# Serves the bundled static/ assets (CSS, JS, images) under /static/... .
+# web.py's built-in dev server (app.run()) has its own automatic /static/
+# file serving (StaticMiddleware, in web/httpserver.py), but it only serves
+# a `static/` directory relative to the process's CWD, and it's never
+# applied at all when running under a real WSGI server (the
+# `application = app.wsgifunc()` path uWSGI etc. use) -- since static/ is
+# bundled inside the installed package now, not the CWD, this route
+# replaces that behavior explicitly so it works the same way in both
+# deployment modes. No authentication, matching the previous CWD-based
+# static serving (and consistent with these being public CSS/JS/image
+# assets referenced directly from HTML).
+class StaticFileAPI:
+
+  def GET(self, relpath):
+    static_root = pathlib.Path(str(importlib.resources.files('itksnap_dss') / 'static')).resolve()
+    target = (static_root / relpath).resolve()
+
+    # Guard against path traversal (e.g. /static/../../../etc/passwd)
+    if not target.is_relative_to(static_root) or not target.is_file():
+      raise web.notfound()
+
+    web.header('Content-Type', guess_mimetype(str(target)))
+    return open(target, 'rb').read()
+
+
 # This API is for downloading blobs directly by a UUID code - clickable and shareable
 # links. There is no authentication involved
 class DirectDownloadAPI (AbstractAPI):
@@ -2244,6 +2271,23 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
 # module-level setup above -- db connect, session init, route table -- runs).
 def main_server():
   if pargs.server:
+    # web.py's app.run() unconditionally wraps the WSGI app with its own
+    # StaticMiddleware, which intercepts every /static/... request BEFORE
+    # our own StaticFileAPI route ever sees it, and serves it from a
+    # `static/` directory relative to the process's CWD -- which no longer
+    # exists there now that static/ is bundled inside the installed package.
+    # Disable that middleware (a no-op passthrough) so our route, which
+    # correctly serves the bundled static/ directory, actually runs.
+    import web.httpserver
+
+    class _NoOpStaticMiddleware:
+      def __init__(self, wrapped_app, prefix="/static/"):
+        self.wrapped_app = wrapped_app
+      def __call__(self, environ, start_response):
+        return self.wrapped_app(environ, start_response)
+
+    web.httpserver.StaticMiddleware = _NoOpStaticMiddleware
+
     # web.py's app.run() reads the port from sys.argv[1:], with sys.argv[0]
     # treated as the program name -- so the port string must be at index 1,
     # not 0.
