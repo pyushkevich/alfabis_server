@@ -1,5 +1,5 @@
 # Start with an image that includes ITK-SNAP command-line tools
-FROM pyushkevich/itksnap:v3.8.0-beta
+FROM pyushkevich/itksnap:4.0
 
 # Standard stuff
 RUN apt-get update

@@ -1,5 +1,5 @@
 # Base image for database
-FROM postgres:10
+FROM postgres:18
 
 # Make sure we have git
 RUN apt-get update
