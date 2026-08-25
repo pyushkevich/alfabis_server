@@ -26,10 +26,14 @@ RUN pip install --trusted-host pypi.python.org .
 # Make port 8080 available to the world outside this container
 EXPOSE 8080
 
-# No build-time DB bake step -- ALFABIS_SQLITE_PATH's directory is
-# auto-created and the schema auto-initialized by itksnap_dss itself on
-# first startup if the file doesn't exist yet (see itksnap_dss/db.py).
-ENV ALFABIS_SQLITE_PATH=/app/data/alfabis.sqlite3
+# No build-time DB bake step, and no ALFABIS_SQLITE_PATH override here --
+# itksnap-dss's own default (datastore/alfabis.sqlite3, relative to the
+# WORKDIR above) is used as-is, same as running it outside Docker. That
+# directory is auto-created and the schema auto-initialized on first
+# startup if the file doesn't exist yet (see itksnap_dss/db.py).
+# docker-compose.yml bind-mounts the host's ./datastore onto it, so the
+# database and uploaded ticket files land in a folder visible on the host
+# instead of the container's ephemeral filesystem.
 
 # Run the server (SQLite -- no separate database service to wait for)
 CMD ["itksnap-dss", "--server"]

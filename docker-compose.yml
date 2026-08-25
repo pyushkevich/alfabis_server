@@ -7,14 +7,18 @@ services:
     ports:
       - "8080:8080"
     environment:
-    #  - ALFABIS_SQLITE_PATH=/app/data/alfabis.sqlite3
       - ALFABIS_NOAUTH=1
-    #volumes:
-    #  - alfabis-data:/app/data
-    #working_dir: /app/alfabis_server
-    # No command override needed: the image's CMD (itksnap-dss --server) and
-    # ENV ALFABIS_SQLITE_PATH already do the right thing, including
-    # auto-initializing the schema on first startup if the DB file is missing.
+    volumes:
+      # Bind-mount the host's ./datastore onto the same path itksnap-dss
+      # already defaults to inside the container (datastore/, relative to
+      # its WORKDIR) -- the database and uploaded ticket files land in a
+      # folder visible on the host, instead of the container's ephemeral
+      # filesystem, and restarting/rebuilding the container doesn't lose
+      # data. Auto-init (itksnap_dss/db.py) creates and initializes the
+      # database here on first run if it isn't already present.
+      - ./datastore:/app/alfabis_server/datastore
+    # No command override needed: the image's CMD (itksnap-dss --server)
+    # already does the right thing.
   service:
     # docker/service/Dockerfile installs an x86_64-only ITK-SNAP release
     # tarball on top of python:3.12-slim; on Apple Silicon that image would
@@ -35,6 +39,3 @@ services:
     environment:
       - DSS_URL=http://app:8080
       - DSS_SERVICE_HASH=e0a316038e9cbe6a000e07c82758532a8863f51f
-
-volumes:
-  alfabis-data:

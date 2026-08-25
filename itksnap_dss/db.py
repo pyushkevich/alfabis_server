@@ -51,7 +51,20 @@ def connect(sqlite_path):
     db._connect = _connect_with_pragmas
 
     try:
-        db.query("PRAGMA journal_mode = WAL")
+        # Rollback journal mode (SQLite's own default) rather than WAL: WAL
+        # needs proper shared-memory (mmap) + byte-range locking support
+        # from the filesystem, which Docker Desktop's bind-mounted host
+        # directories on macOS don't reliably provide. With WAL enabled,
+        # this database's schema-existence check below would intermittently
+        # see a stale/empty view of an already-initialized database over a
+        # bind mount, re-running the (destructive -- DROP TABLE IF EXISTS)
+        # init script on every container restart. Explicitly setting DELETE
+        # here (not just relying on the compiled-in default) also converts
+        # any database file that was already switched to WAL by an earlier
+        # version of this code. DELETE mode is slower under heavy concurrent
+        # access than WAL, but this app's actual concurrency (a handful of
+        # provider daemons polling) doesn't come close to needing WAL.
+        db.query("PRAGMA journal_mode = DELETE")
     except sqlite3.OperationalError as e:
         sys.exit(
             "itksnap-dss: could not open SQLite database at '%s': %s\n"
