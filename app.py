@@ -25,6 +25,32 @@ from apiclient.discovery import build
 from git import Repo
 from git import Git
 
+# Command-line configuration. Each flag falls back to the corresponding
+# environment variable (handy for Docker/systemd deployments where env vars
+# are the natural fit), which falls back to a built-in default; a CLI flag
+# always wins if given. Run with --help to see this list at any time --
+# that's the point of having it here instead of only in scattered os.environ
+# reads below.
+parser = argparse.ArgumentParser(description="ITK-SNAP DSS (alfabis) server")
+parser.add_argument("--server", action="store_true",
+  help="Run as a stand-alone server (otherwise expose `application` for a WSGI server)")
+parser.add_argument("--port", type=int, default=8080,
+  help="Port for the stand-alone server (default: 8080)")
+parser.add_argument("--sqlite-path", default=os.environ.get('ALFABIS_SQLITE_PATH', 'datastore/alfabis.sqlite3'),
+  help="Path to the SQLite database file [env: ALFABIS_SQLITE_PATH] (default: datastore/alfabis.sqlite3)")
+parser.add_argument("--datastore-root", default=os.environ.get('ALFABIS_DATASTORE_ROOT', 'datastore'),
+  help="Root directory for uploaded/generated files [env: ALFABIS_DATASTORE_ROOT] (default: datastore)")
+parser.add_argument("--cookie-domain", default=os.environ.get('ALFABIS_COOKIE_DOMAIN', 'dss.itksnap.org'),
+  help="Session cookie Domain attribute; pass '' for a host-only cookie, needed when testing "
+       "against localhost/127.0.0.1 [env: ALFABIS_COOKIE_DOMAIN] (default: dss.itksnap.org)")
+parser.add_argument("--noauth", action="store_true", default="ALFABIS_NOAUTH" in os.environ,
+  help="Bypass login entirely, auto-logged-in as a sysadmin test user -- local dev/testing "
+       "only, never use in production [env: ALFABIS_NOAUTH]")
+parser.add_argument("--google-clientsecret", default=os.environ.get('ALFABIS_GOOGLE_CLIENTSECRET'),
+  help="Path to the Google OAuth2 client_secret.json, required for browser login "
+       "[env: ALFABIS_GOOGLE_CLIENTSECRET]")
+pargs = parser.parse_args()
+
 # Needed for session support
 web.config.debug = False
 
@@ -34,7 +60,7 @@ web.config.session_parameters['cookie_name'] = 'webpy_session_id'
 # The cookie domain defaults to the production value but can be overridden (e.g.
 # to a blank value for host-only cookies during local/test runs against localhost,
 # where a Domain=dss.itksnap.org cookie would never be sent back by the client)
-cookie_domain = os.environ.get('ALFABIS_COOKIE_DOMAIN', 'dss.itksnap.org')
+cookie_domain = pargs.cookie_domain
 if cookie_domain:
   web.config.session_parameters['cookie_domain'] = cookie_domain
 
@@ -109,7 +135,7 @@ app = web.application(urls, globals())
 # below is enough. `foreign_keys` is NOT persisted per-file, though, and has no
 # native connect() kwarg, so it has to be (re-)applied on every new connection
 # via a small wrapper around db._connect().
-sqlite_path = os.environ.get('ALFABIS_SQLITE_PATH', 'datastore/alfabis.sqlite3')
+sqlite_path = pargs.sqlite_path
 
 # sqlite3.connect() does not create parent directories (unlike the datastore/
 # subdirectories elsewhere in this file, which the app creates on demand via
@@ -158,12 +184,12 @@ if db.query(
 # Root directory for uploaded/generated files (ticket inputs/results, attachments,
 # service git checkouts). Configurable so test runs can point it at an isolated
 # temp directory instead of colliding on a shared ./datastore.
-datastore_root = os.environ.get('ALFABIS_DATASTORE_ROOT', 'datastore')
+datastore_root = pargs.datastore_root
 
 # Configure the session. By default, the session is initialized with nothing
 # but in no-auth mode, the session should be initialized as logged in with
 # user set
-if "ALFABIS_NOAUTH" not in os.environ:
+if not pargs.noauth:
 
   # Blank session
   sess = web.session.Session(
@@ -241,8 +267,13 @@ class OAuthHelper:
 
   def __init__(self):
 
+    if not pargs.google_clientsecret:
+      raise web.HTTPError("500 internal server error", {},
+        "Google login is not configured: pass --google-clientsecret <path to client_secret.json> "
+        "(or set ALFABIS_GOOGLE_CLIENTSECRET). Use --noauth for local dev/testing without it.")
+
     self.flow = client.flow_from_clientsecrets(
-        os.environ['ALFABIS_GOOGLE_CLIENTSECRET'],
+        pargs.google_clientsecret,
         scope=[
             'https://www.googleapis.com/auth/userinfo.email',
             'https://www.googleapis.com/auth/userinfo.profile'],
@@ -2244,13 +2275,8 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
 
 
 
-# Argument parser
-parser = argparse.ArgumentParser()
-parser.add_argument("--server", help="Run as a stand-alone server", action="store_true")
-parser.add_argument("--port", help="Port on which to run stand-alone server", type=int, default=8080)
-pargs = parser.parse_args();
-
-# Which action to take
+# Which action to take (pargs was parsed at the top of the file, alongside
+# the rest of the command-line configuration)
 if pargs.server:
   # web.py's app.run() reads the port from sys.argv[1:], with sys.argv[0] treated
   # as the program name -- so the port string must be at index 1, not 0.
