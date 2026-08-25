@@ -3,12 +3,12 @@ import web,sys
 import markdown
 import json
 import os
+import importlib.resources
 import shutil
 import hashlib
 import csv
 import io
 import glob
-import sqlite3
 import uuid
 import mimetypes
 import httplib2
@@ -131,62 +131,13 @@ app = web.application(urls, globals())
 
 # Connect to the database. SQLite path defaults to a file under datastore/ so
 # it lives alongside the uploaded-file tree, but can be overridden (e.g. by the
-# test harness, which points this at a temp file per test run).
-#
-# web.py opens SQLite connections lazily, one per thread (no pooling), via
-# db._connect(). `timeout` is a native sqlite3.connect() kwarg (busy-wait
-# seconds), so passing it here applies it to every connection automatically.
-# `journal_mode=WAL` is stored in the database file itself, so setting it once
-# below is enough. `foreign_keys` is NOT persisted per-file, though, and has no
-# native connect() kwarg, so it has to be (re-)applied on every new connection
-# via a small wrapper around db._connect().
+# test harness, which points this at a temp file per test run). Connection
+# setup, PRAGMAs, and auto-initializing the schema from the bundled
+# sql/init_db_sqlite.sql if the database is missing/empty all live in
+# itksnap_dss.db -- see that module for details.
+from itksnap_dss import db as _db
 sqlite_path = pargs.sqlite_path
-
-# sqlite3.connect() does not create parent directories (unlike the datastore/
-# subdirectories elsewhere in this file, which the app creates on demand via
-# os.makedirs) -- so the default path fails outright the first time the app is
-# run somewhere that doesn't already have a datastore/ directory.
-sqlite_dir = os.path.dirname(sqlite_path)
-if sqlite_dir:
-  # exist_ok=True: multiple uWSGI/gunicorn worker processes can hit this at
-  # once on startup, and the plain exists-check-then-makedirs above raced.
-  os.makedirs(sqlite_dir, exist_ok=True)
-
-db = web.database(dbn='sqlite', db=sqlite_path, timeout=5.0)
-
-# Install the per-connection PRAGMA wrapper BEFORE issuing any queries, so the
-# very first connection (opened lazily by the query below) gets it too.
-_orig_db_connect = db._connect
-def _connect_with_pragmas(keywords):
-  conn = _orig_db_connect(keywords)
-  conn.execute("PRAGMA foreign_keys = ON")
-  return conn
-db._connect = _connect_with_pragmas
-
-try:
-  db.query("PRAGMA journal_mode = WAL")
-except sqlite3.OperationalError as e:
-  sys.exit(
-    "alfabis: could not open SQLite database at '%s': %s\n"
-    "(Set ALFABIS_SQLITE_PATH to point at a writable database file.)"
-    % (sqlite_path, e)
-  )
-
-# Fail fast and clearly if the database file doesn't exist yet or hasn't been
-# initialized with the schema (sql/init_db_sqlite.sql) -- e.g. ALFABIS_SQLITE_PATH
-# wasn't set and the default path has never been initialized. Without this check
-# sqlite3 happily connects to (and even creates) an empty file, and the app would
-# start up looking fine, then fail on the first request with a raw, confusing
-# "no such table" 500 instead of a clear message at startup.
-if db.query(
-    "select count(*) as n from sqlite_master where type='table' and name='users'"
-)[0].n == 0:
-  sys.exit(
-    "alfabis: SQLite database at '%s' is not initialized.\n"
-    "Run: sqlite3 '%s' < sql/init_db_sqlite.sql\n"
-    "(Set ALFABIS_SQLITE_PATH to point at a different database file.)"
-    % (sqlite_path, sqlite_path)
-  )
+db = _db.connect(sqlite_path)
 
 # Root directory for uploaded/generated files (ticket inputs/results, attachments,
 # service git checkouts). Configurable so test runs can point it at an isolated
@@ -223,10 +174,15 @@ else:
 
 
 
-# Configure the template renderer with session support
+# Configure the template renderer with session support. Templates are
+# bundled package data (itksnap_dss/templates/), resolved via
+# importlib.resources rather than a path relative to the process's CWD --
+# CWD-relative resolution here previously caused a real bug (templates
+# failed to load when the process wasn't started from this exact directory).
+_templates_dir = str(importlib.resources.files('itksnap_dss') / 'templates')
 render = web.template.render(
-  'temp/', 
-  globals={'markdown': markdown.markdown, 'session': sess}, 
+  _templates_dir,
+  globals={'markdown': markdown.markdown, 'session': sess},
   cache=False);
 
 # Configure the markdown to HTML converter (do we need this really? Why not HTML5?)
@@ -2282,14 +2238,22 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
 
 
 
-# Which action to take (pargs was parsed at the top of the file, alongside
-# the rest of the command-line configuration)
-if pargs.server:
-  # web.py's app.run() reads the port from sys.argv[1:], with sys.argv[0] treated
-  # as the program name -- so the port string must be at index 1, not 0.
-  sys.argv = [sys.argv[0], str(pargs.port)]
-  app.run()
-else:
-  application=app.wsgifunc()
-###  if __name__ == '__main__' :
-###  app.run()
+# itksnap_dss.cli:main calls this to actually run the stand-alone dev server
+# (pargs was parsed at the top of this file, alongside the rest of the
+# command-line configuration, since it must exist before any of the
+# module-level setup above -- db connect, session init, route table -- runs).
+def main_server():
+  if pargs.server:
+    # web.py's app.run() reads the port from sys.argv[1:], with sys.argv[0]
+    # treated as the program name -- so the port string must be at index 1,
+    # not 0.
+    sys.argv = [sys.argv[0], str(pargs.port)]
+    app.run()
+  # else: nothing to do here -- a WSGI server imports `application` (below)
+  # directly and never calls main_server() at all.
+
+# Exposed at import time (not inside main_server()) so a WSGI server can do
+# `module = itksnap_dss.app:application` with zero function calls, exactly
+# as before this file moved into a package.
+if not pargs.server:
+  application = app.wsgifunc()

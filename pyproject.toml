@@ -1,0 +1,61 @@
+[project]
+name = "itksnap-dss"
+version = "0.1.0"
+authors = [
+  { name = "Paul Yushkevich", email = "pyushkevich@gmail.com" },
+]
+description = "ITK-SNAP Distributed Segmentation Service (DSS) middleware server"
+license = "Apache-2.0"
+dependencies = [
+    "web.py==0.76",
+    "markdown==3.10.3",
+    "httplib2==0.32.0",
+    "rsa==4.9.1",
+    "oauth2client==4.1.3",
+    "google-api-python-client==2.199.0",
+    "gitpython==3.1.59",
+]
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "requests>=2.31",
+]
+
+[project.urls]
+Homepage = "https://github.com/pyushkevich/alfabis_server"
+
+[project.scripts]
+itksnap-dss = "itksnap_dss.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["itksnap_dss"]
+
+[tool.setuptools.package-data]
+itksnap_dss = [
+    "sql/*.sql",
+    "sql/deltas/*.sql",
+    "sql/deltas/*.md",
+    "templates/*.md",
+    "templates/*.html",
+    "static/*.css",
+    "static/img/*.png",
+    "static/google/signin/*.png",
+    "static/pure/*.css",
+    "static/pure/*.md",
+    "static/pure/*.json",
+    "static/pure/js/*.js",
+    "static/pure/layouts/*.css",
+]

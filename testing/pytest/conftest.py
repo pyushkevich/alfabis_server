@@ -1,12 +1,17 @@
 """
-Docker-free integration test harness for the alfabis (ITK-SNAP DSS) server.
+Docker-free integration test harness for the itksnap-dss (ITK-SNAP DSS) server.
 
-Starts `app.py --server` as a plain local subprocess against a temp SQLite
-file and a temp datastore directory -- no Postgres, no Docker. Users are
-seeded directly via sqlite3 (not through OAuth, which is out of scope for
-this suite -- see the project plan). The server runs WITHOUT ALFABIS_NOAUTH
-so the real token-login path (the one itksnap-wt / dss_daemon.sh actually
-use) is exercised.
+Starts `python -m itksnap_dss --server` as a plain local subprocess against a
+temp SQLite file and a temp datastore directory -- no Postgres, no Docker.
+The SQLite file is intentionally left non-existent; the server auto-creates
+and initializes it on startup (itksnap_dss.db), so every test run also
+exercises that auto-init path. Users are seeded directly via sqlite3 (not
+through OAuth, which is out of scope for this suite -- see the project
+plan). The server runs WITHOUT ALFABIS_NOAUTH so the real token-login path
+(the one itksnap-wt / dss_daemon.sh actually use) is exercised.
+
+Requires the package to be installed (editable is fine: `pip install -e .`)
+so `python -m itksnap_dss` resolves.
 """
 import os
 import signal
@@ -21,8 +26,6 @@ import pytest
 import requests
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SCHEMA_SQL = os.path.join(REPO_ROOT, "sql", "init_db_sqlite.sql")
-APP_PY = os.path.join(REPO_ROOT, "app.py")
 
 
 def free_port():
@@ -79,16 +82,14 @@ class Server:
 
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
-    workdir = tmp_path_factory.mktemp("alfabis_server_run")
+    workdir = tmp_path_factory.mktemp("itksnap_dss_run")
     sqlite_path = str(workdir / "test.sqlite3")
     datastore_root = str(workdir / "datastore")
     os.makedirs(datastore_root, exist_ok=True)
 
-    conn = sqlite3.connect(sqlite_path)
-    with open(SCHEMA_SQL) as f:
-        conn.executescript(f.read())
-    conn.commit()
-    conn.close()
+    # sqlite_path is intentionally left non-existent here -- the server
+    # itself must create and initialize it on startup (auto-init, exercised
+    # implicitly by every test in this suite).
 
     port = free_port()
     env = dict(os.environ)
@@ -99,8 +100,8 @@ def server(tmp_path_factory):
     env.pop("ALFABIS_GOOGLE_CLIENTSECRET", None)  # OAuth routes are out of scope, never hit
 
     proc = subprocess.Popen(
-        [sys.executable, APP_PY, "--server", "--port", str(port)],
-        cwd=REPO_ROOT,  # so temp/, static/ resolve as they do in production
+        [sys.executable, "-m", "itksnap_dss", "--server", "--port", str(port)],
+        cwd=REPO_ROOT,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

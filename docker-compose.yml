@@ -12,9 +12,9 @@ services:
     #volumes:
     #  - alfabis-data:/app/data
     #working_dir: /app/alfabis_server
-    # Initialize the SQLite schema only if the database file doesn't exist yet,
-    # so restarting the container doesn't wipe a persistent volume's data.
-    # command: ["sh", "-c", "test -f \"$ALFABIS_SQLITE_PATH\" || sqlite3 \"$ALFABIS_SQLITE_PATH\" < sql/init_db_sqlite.sql; exec python app.py --server"]
+    # No command override needed: the image's CMD (itksnap-dss --server) and
+    # ENV ALFABIS_SQLITE_PATH already do the right thing, including
+    # auto-initializing the schema on first startup if the DB file is missing.
   service:
     # docker/service/Dockerfile installs an x86_64-only ITK-SNAP release
     # tarball on top of python:3.12-slim; on Apple Silicon that image would
