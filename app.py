@@ -8,6 +8,7 @@ import hashlib
 import csv
 import io
 import glob
+import sqlite3
 import uuid
 import mimetypes
 import httplib2
@@ -109,6 +110,15 @@ app = web.application(urls, globals())
 # native connect() kwarg, so it has to be (re-)applied on every new connection
 # via a small wrapper around db._connect().
 sqlite_path = os.environ.get('ALFABIS_SQLITE_PATH', 'datastore/alfabis.sqlite3')
+
+# sqlite3.connect() does not create parent directories (unlike the datastore/
+# subdirectories elsewhere in this file, which the app creates on demand via
+# os.makedirs) -- so the default path fails outright the first time the app is
+# run somewhere that doesn't already have a datastore/ directory.
+sqlite_dir = os.path.dirname(sqlite_path)
+if sqlite_dir and not os.path.exists(sqlite_dir):
+  os.makedirs(sqlite_dir)
+
 db = web.database(dbn='sqlite', db=sqlite_path, timeout=5.0)
 
 # Install the per-connection PRAGMA wrapper BEFORE issuing any queries, so the
@@ -120,7 +130,14 @@ def _connect_with_pragmas(keywords):
   return conn
 db._connect = _connect_with_pragmas
 
-db.query("PRAGMA journal_mode = WAL")
+try:
+  db.query("PRAGMA journal_mode = WAL")
+except sqlite3.OperationalError as e:
+  sys.exit(
+    "alfabis: could not open SQLite database at '%s': %s\n"
+    "(Set ALFABIS_SQLITE_PATH to point at a writable database file.)"
+    % (sqlite_path, e)
+  )
 
 # Fail fast and clearly if the database file doesn't exist yet or hasn't been
 # initialized with the schema (sql/init_db_sqlite.sql) -- e.g. ALFABIS_SQLITE_PATH
