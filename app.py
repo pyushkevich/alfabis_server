@@ -6,7 +6,7 @@ import os
 import shutil
 import hashlib
 import csv
-import StringIO
+import io
 import glob
 import uuid
 import mimetypes
@@ -29,8 +29,15 @@ web.config.debug = False
 
 # Session support
 web.config.session_parameters['cookie_name'] = 'webpy_session_id'
-web.config.session_parameters['cookie_domain'] = 'dss.itksnap.org'
-web.config.session_parameters['timeout'] = 31536000 
+
+# The cookie domain defaults to the production value but can be overridden (e.g.
+# to a blank value for host-only cookies during local/test runs against localhost,
+# where a Domain=dss.itksnap.org cookie would never be sent back by the client)
+cookie_domain = os.environ.get('ALFABIS_COOKIE_DOMAIN', 'dss.itksnap.org')
+if cookie_domain:
+  web.config.session_parameters['cookie_domain'] = cookie_domain
+
+web.config.session_parameters['timeout'] = 31536000
 web.config.session_parameters['ignore_expiry'] = True
 web.config.session_parameters['ignore_change_ip'] = True
 web.config.session_parameters['secret_key'] = 'Hdx1ym849Zj5Dg3gB8A0'
@@ -90,32 +97,69 @@ urls = (
 # Create the web app
 app = web.application(urls, globals())
 
-# Connect to the database
-db = web.database(
-  host=os.environ['POSTGRES_PORT_5432_TCP_ADDR'],
-  port=os.environ['POSTGRES_PORT_5432_TCP_PORT'],
-  dbn='postgres', 
-  db=os.environ['ALFABIS_DATABASE_NAME'],
-  user=os.environ['ALFABIS_DATABASE_USERNAME'],
-  pw=os.environ['ALFABIS_DATABASE_PASSWORD'])
+# Connect to the database. SQLite path defaults to a file under datastore/ so
+# it lives alongside the uploaded-file tree, but can be overridden (e.g. by the
+# test harness, which points this at a temp file per test run).
+#
+# web.py opens SQLite connections lazily, one per thread (no pooling), via
+# db._connect(). `timeout` is a native sqlite3.connect() kwarg (busy-wait
+# seconds), so passing it here applies it to every connection automatically.
+# `journal_mode=WAL` is stored in the database file itself, so setting it once
+# below is enough. `foreign_keys` is NOT persisted per-file, though, and has no
+# native connect() kwarg, so it has to be (re-)applied on every new connection
+# via a small wrapper around db._connect().
+sqlite_path = os.environ.get('ALFABIS_SQLITE_PATH', 'datastore/alfabis.sqlite3')
+db = web.database(dbn='sqlite', db=sqlite_path, timeout=5.0)
+
+# Install the per-connection PRAGMA wrapper BEFORE issuing any queries, so the
+# very first connection (opened lazily by the query below) gets it too.
+_orig_db_connect = db._connect
+def _connect_with_pragmas(keywords):
+  conn = _orig_db_connect(keywords)
+  conn.execute("PRAGMA foreign_keys = ON")
+  return conn
+db._connect = _connect_with_pragmas
+
+db.query("PRAGMA journal_mode = WAL")
+
+# Fail fast and clearly if the database file doesn't exist yet or hasn't been
+# initialized with the schema (sql/init_db_sqlite.sql) -- e.g. ALFABIS_SQLITE_PATH
+# wasn't set and the default path has never been initialized. Without this check
+# sqlite3 happily connects to (and even creates) an empty file, and the app would
+# start up looking fine, then fail on the first request with a raw, confusing
+# "no such table" 500 instead of a clear message at startup.
+if db.query(
+    "select count(*) as n from sqlite_master where type='table' and name='users'"
+)[0].n == 0:
+  sys.exit(
+    "alfabis: SQLite database at '%s' is not initialized.\n"
+    "Run: sqlite3 '%s' < sql/init_db_sqlite.sql\n"
+    "(Set ALFABIS_SQLITE_PATH to point at a different database file.)"
+    % (sqlite_path, sqlite_path)
+  )
+
+# Root directory for uploaded/generated files (ticket inputs/results, attachments,
+# service git checkouts). Configurable so test runs can point it at an isolated
+# temp directory instead of colliding on a shared ./datastore.
+datastore_root = os.environ.get('ALFABIS_DATASTORE_ROOT', 'datastore')
 
 # Configure the session. By default, the session is initialized with nothing
 # but in no-auth mode, the session should be initialized as logged in with
-# user set 
+# user set
 if "ALFABIS_NOAUTH" not in os.environ:
 
   # Blank session
   sess = web.session.Session(
-    app, web.session.DBStore(db, 'sessions'), 
+    app, web.session.DBStore(db, 'sessions'),
     initializer={'loggedin': False, 'acceptterms': False, 'is_admin': False})
 
 else:
   # Make sure user exists, if not populate in the user table
-  new_token=os.urandom(24).encode('hex')
+  new_token=os.urandom(24).hex()
   db.query(
-    "insert into users values(DEFAULT,'test@example.com',$new_token,"
-    "                         'Test User', TRUE, 'poweruser') "
-    "on conflict do nothing", vars=locals())
+    "insert into users (email,passwd,dispname,sysadmin,tier) "
+    "  values('test@example.com',$new_token,'Test User', 1, 'poweruser') "
+    "  on conflict (email) do nothing", vars=locals())
 
   # Get the user id of the test user
   user_id = db.select('users', where="email='test@example.com'")[0].id;
@@ -151,7 +195,7 @@ def render_markdown(page, *args):
   ctx['path'] = web.ctx.path
 
   # Render the full page
-  return render.style(md.convert(unicode(text)), ctx);
+  return render.style(md.convert(str(text)), ctx);
 
 # Render markdown page without menus
 def render_markdown_nomenus(page, *args):
@@ -164,7 +208,7 @@ def render_markdown_nomenus(page, *args):
   ctx['path'] = web.ctx.path
 
   # Render the full page
-  return render.bare(md.convert(unicode(text)), ctx);
+  return render.bare(md.convert(str(text)), ctx);
 
 # Determine mime type from filename or return octet stream
 def guess_mimetype(filename):
@@ -297,29 +341,29 @@ class ServicesPage:
 
     # Get a listing of services with details
     services = db.query(
-      "select name, shortdesc, githash, json, now() - pingtime as since, "
-      "       D.avg as avg_runtime, n_success, n_failed, "
-      "       greatest(0,W.count) as queue_length "
+      "select name, shortdesc, githash, json, (strftime('%s','now') - pingtime) as since, "
+      "       D.avg_runtime as avg_runtime, n_success, n_failed, "
+      "       max(0,coalesce(W.count,0)) as queue_length "
       "from services S "
       "     left join ( "
-      "         select service_githash, avg(runtime) "
+      "         select service_githash, avg(runtime) as avg_runtime "
       "         from success_ticket_duration "
-      "         where now() - endtime < interval '1 day' "
+      "         where strftime('%s','now') - endtime < 86400 "
       "         group by service_githash "
       "     ) D on S.githash = D.service_githash "
       "     left join ( "
       "         select service_githash, "
-      "                greatest(0,sum(cast (TH.status = 'success' as int))) as n_success, "
-      "                greatest(0,sum(cast (TH.status in ( 'failed', 'timeout') as int))) as n_failed "
+      "                max(0,sum(TH.status = 'success')) as n_success, "
+      "                max(0,sum(TH.status in ( 'failed', 'timeout'))) as n_failed "
       "         from ticket_history TH, tickets T "
-      "         where TH.ticket_id = T.id  and now() - atime < interval '1 day' "
+      "         where TH.ticket_id = T.id  and strftime('%s','now') - atime < 86400 "
       "         group by service_githash "
       "     ) Q on Q.service_githash = githash "
       "     left join ( "
-      "         select service_githash, count(id) "
+      "         select service_githash, count(id) as count "
       "         from tickets where status='ready' group by service_githash "
       "     ) W on W.service_githash = githash "
-      "where S.current = true "
+      "where S.current = 1 "
       "order by n_success desc");
 
     # Parse through the results into something more readable
@@ -331,7 +375,7 @@ class ServicesPage:
       s['shortdesc'] = x.shortdesc;
       s['longdesc'] = j['longdesc'];
       s['url'] = j['url'];
-      alive_sec = x.since.total_seconds();
+      alive_sec = x.since;
       s['alive_btn'] = 'green' if alive_sec < 600 else ('yellow' if alive_sec < 3600 else 'red')
       s['alive_min'] = round(alive_sec / 60,2)
 
@@ -351,7 +395,7 @@ class ServicesPage:
       s['queuelen'] = x.queue_length
 
       if x.avg_runtime is not None:
-        s['runtime'] = "<br>%4.1f min" % (x.avg_runtime.total_seconds() / 60.0)
+        s['runtime'] = "<br>%4.1f min" % (x.avg_runtime / 60.0)
       else:
         s['runtime'] = ""
 
@@ -374,8 +418,13 @@ class AdminPage:
 
 class AdminTicketsPage:
 
-  def format_date(self, dt):
+  # ts is an epoch-seconds int (as stored in the ticket_history.atime column)
+  def format_date(self, ts):
 
+    if ts is None:
+      return None
+
+    dt = datetime.datetime.fromtimestamp(ts)
     n = datetime.datetime.now()
     if n.year == dt.year:
       if n.day == dt.day:
@@ -383,15 +432,15 @@ class AdminTicketsPage:
       return dt.strftime("%b %d  %H:%M");
     return dt.strftime("%b %d %Y  %H:%M");
 
-  def format_delta(self, dt1, dt2):
+  # t1, t2 are epoch-seconds ints
+  def format_delta(self, t1, t2):
 
-    if dt1 is None or dt2 is None:
+    if t1 is None or t2 is None:
       return None
 
-    delta = dt2 - dt1
-    h = delta.seconds / 3600
-    m = (delta.seconds / 60) % 60
-    s = delta.seconds % 60
+    seconds = int(t2 - t1)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
 
     if h > 0:
       return "%02d:%02d:%02d" % (h,m,s)
@@ -408,17 +457,17 @@ class AdminTicketsPage:
     # Get the listing of tickets, this is a hell of a query
     q = db.query(
         "select T.id, S.name, T.status, email, dispname, "
-        "       Tinit, Tclaimed, Tsuccess, Tfailed, Ttimeout, Tdeleted, progress "
+        "       tinit, tclaimed, tsuccess, tfailed, ttimeout, tdeleted, progress "
         "from tickets T "
         "     left join users U on T.user_id = U.id "
         "     left join services S on T.service_githash = S.githash "
         "     left join (select ticket_id, "
-        "                       max(case when status='init' then atime else NULL end) as Tinit, "
-        "                       max(case when status='claimed' then atime else NULL end) as Tclaimed, "
-        "                       max(case when status='success' then atime else NULL end) as Tsuccess, "
-        "                       max(case when status='failed' then atime else NULL end) as Tfailed, "
-        "                       max(case when status='timeout' then atime else NULL end) as Ttimeout, "
-        "                       max(case when status='deleted' then atime else NULL end) as Tdeleted "
+        "                       max(case when status='init' then atime else NULL end) as tinit, "
+        "                       max(case when status='claimed' then atime else NULL end) as tclaimed, "
+        "                       max(case when status='success' then atime else NULL end) as tsuccess, "
+        "                       max(case when status='failed' then atime else NULL end) as tfailed, "
+        "                       max(case when status='timeout' then atime else NULL end) as ttimeout, "
+        "                       max(case when status='deleted' then atime else NULL end) as tdeleted "
         "                from ticket_history group by ticket_id) TH on TH.ticket_id = T.id "
         "     left join (select ticket_id, sum(progress * (chunk_end - chunk_start)) as progress "
         "                from ticket_progress group by ticket_id) P on P.ticket_id = T.id "
@@ -430,7 +479,7 @@ class AdminTicketsPage:
       
       # Orgaize the data for this ticket
       T = {}
-      print row
+      print(row)
       T['id'] = row.id
       T['service'] = row.name
       T['status'] = row.status
@@ -458,7 +507,7 @@ class AdminTicketsPage:
       T['T_claim'] = self.format_delta(row.tinit, row.tclaimed)
 
       # Figure out the end date
-      t_end = datetime.datetime.now();
+      t_end = int(time.time());
       for t_test in (row.tsuccess, row.tfailed, row.ttimeout, row.tdeleted):
         if t_test is not None and t_test < t_end:
           t_end = t_test
@@ -554,9 +603,14 @@ class TicketLogic:
   def __init__(self, ticket_id):
     self.ticket_id = ticket_id
 
+  # NOTE: web.py's SqliteResultSet (unlike its Postgres ResultSet) does not
+  # support len() at all -- it only supports bool()/iteration/indexing, since
+  # sqlite3's cursor.rowcount is not reliable for SELECTs. So query-result
+  # emptiness checks throughout this file use bool(res)/`not res`/`if res:`
+  # rather than len(res), and counts materialize to a list first.
   def check_consumer_access(self, user_id, status_list = None):
     res = db.select("tickets",where="user_id=$user_id and id=$self.ticket_id",vars=locals())
-    return len(res) > 0 and (status_list is None or res[0].status in status_list)
+    return bool(res) and (status_list is None or res[0].status in status_list)
 
   def check_provider_access(self, provider_id, status_list = None):
     res = db.query(
@@ -564,18 +618,18 @@ class TicketLogic:
       "where T.id = $self.ticket_id and PA.user_id = $provider_id "
       "  and T.service_githash = PS.service_githash and PA.provider = PS.provider_name",
       vars=locals())
-    return len(res) > 0 and (status_list is None or res[0].status in status_list)
+    return bool(res) and (status_list is None or res[0].status in status_list)
 
   def is_not_deleted(self):
     res = db.select("tickets",where="id=$self.ticket_id", vars=locals())
-    return len(res) > 0 and (res[0].status != 'deleted')
+    return bool(res) and (res[0].status != 'deleted')
 
-  # Check that the specified provider has actually claimed this ticket 
+  # Check that the specified provider has actually claimed this ticket
   def check_provider_claimed(self, user_id):
-    res = db.select("claim_history", 
+    res = db.select("claim_history",
       where="ticket_id=$self.ticket_id and puser_id=$user_id",
       vars=locals());
-    return len(res) > 0
+    return bool(res)
 
   # Set the status of the ticket. This sets the status in the 'tickets' table but
   # also logs the status change in the 'ticket_history' table
@@ -629,10 +683,10 @@ class TicketLogic:
   # Measure the total progress for a ticket
   def total_progress(self):
     res = db.query(
-      "select greatest(0, sum((chunk_end-chunk_start) * progress)) as x from ticket_progress "
-      "where ticket_id=$self.ticket_id", 
+      "select max(0, coalesce(sum((chunk_end-chunk_start) * progress), 0)) as x from ticket_progress "
+      "where ticket_id=$self.ticket_id",
       vars=locals())
-    if len(res) > 0:
+    if res:
       return float(res[0].x)
     else:
       return 0
@@ -643,9 +697,9 @@ class TicketLogic:
       "select count(id) as x from tickets "
       "where service_githash = (select service_githash from tickets where id = $self.ticket_id) "
       "  and status='ready' "
-      "  and id <= $self.ticket_id", 
+      "  and id <= $self.ticket_id",
       vars=locals())
-    if len(res) > 0:
+    if res:
       return res[0].x
 
   # Update the progress of a ticket for a chunk
@@ -654,9 +708,9 @@ class TicketLogic:
 
       # Update the ping on this service
       db.query(
-        "update services as S set pingtime=now() "
-        "from tickets as T "
-        "where S.githash = T.service_githash and T.id = $self.ticket_id", vars=locals());
+        "update services set pingtime=(strftime('%s','now')) "
+        "where githash = (select service_githash from tickets where id = $self.ticket_id)",
+        vars=locals());
 
       # If progress value inside of the chunk is zero, this triggers an update where all values
       # inside of the chunk are deleted, and no further action is taken
@@ -681,7 +735,7 @@ class TicketLogic:
 
   # Get the file directory for given area
   def get_filedir(self, area):
-    filedir = 'datastore/tickets/%08d/%s' % (int(self.ticket_id), area)
+    filedir = '%s/tickets/%08d/%s' % (datastore_root, int(self.ticket_id), area)
     if not os.path.exists(filedir):
       os.makedirs(filedir)
     return filedir
@@ -697,13 +751,13 @@ class TicketLogic:
 
   # Erase the ticket file directory
   def erase_dir(self, area):
-    filedir = 'datastore/tickets/%08d/%s' % (int(self.ticket_id), area)
+    filedir = '%s/tickets/%08d/%s' % (datastore_root, int(self.ticket_id), area)
     if os.path.exists(filedir):
       shutil.rmtree(filedir)
 
   # Erase the attachments for a ticket
   def erase_attachments(self):
-    filedir = 'datastore/attachments/%08d' % int(self.ticket_id)
+    filedir = '%s/attachments/%08d' % (datastore_root, int(self.ticket_id))
     if os.path.exists(filedir):
       shutil.rmtree(filedir)
 
@@ -715,7 +769,7 @@ class TicketLogic:
     filepath=fileobj.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
     filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
     
-    fout = open(filedir +'/'+ filename,'w') # creates the file where the uploaded file should be stored
+    fout = open(filedir +'/'+ filename,'wb') # creates the file where the uploaded file should be stored
     fout.write(fileobj.file.read()) # writes the uploaded file to the newly created file.
     fout.close() # closes the file, upload complete.
 
@@ -780,7 +834,7 @@ class TicketLogic:
         description=desc, mime_type=mime_type, uuid = ahash)
 
     # Create the directory for the attachment
-    filedir = 'datastore/attachments/%08d' % int(self.ticket_id)
+    filedir = '%s/attachments/%08d' % (datastore_root, int(self.ticket_id))
     if not os.path.exists(filedir):
       os.makedirs(filedir)
 
@@ -815,7 +869,7 @@ class TicketLogic:
     # If the status is 'ready', report the queue position (global)
     if qr['status'] == 'ready':
       qresult = db.query(
-        "select count(*) from tickets where status='ready' and id <= $self.ticket_id", 
+        "select count(*) as count from tickets where status='ready' and id <= $self.ticket_id",
         vars=locals())
       qr['queue_position'] = qresult[0].count
 
@@ -869,7 +923,7 @@ class TicketLogLogic:
       "where T.user_id = $user_id and T.id = L.ticket_id and L.id = $self.log_id",
       vars=locals())
 
-    return len(res) > 0
+    return bool(res)
 
   # List all attachments for this log entry with URLs
   def get_attachments(self):
@@ -908,7 +962,7 @@ class TicketLogLogic:
       db.update("ticket_log", where="id = $self.log_id", attachments=res2[0].count, vars=locals())
 
     # Create the directory for the output
-    filedir = 'datastore/logdata/%08d' % int(self.log_id)
+    filedir = '%s/logdata/%08d' % (datastore_root, int(self.log_id))
     if not os.path.exists(filedir):
       os.makedirs(filedir)
 
@@ -936,14 +990,14 @@ class ProviderServiceLogic:
     
     # Get a list of service githashshes and whether the service has any providers
     q = db.query(
-      "select S.githash, bool_or(PS.current) as any_prov "
+      "select S.githash, max(PS.current) as any_prov "
       "from provider_services PS, services S "
       "where S.githash=PS.service_githash "
       "GROUP BY S.githash", vars=locals())
 
     # For each service that has been 'orphaned', disable it
     for qrow in q:
-      if qrow.any_prov is False:
+      if not qrow.any_prov:
         db.update("services", where="githash=$qrow.githash", current=False, vars=locals())
 
 
@@ -961,19 +1015,23 @@ class ClaimLogic:
     with db.transaction():
 
       # Update the ping on all services
-      db.query("update services set pingtime=now() where githash in (%s)" % svc_sql)
+      db.query("update services set pingtime=(strftime('%%s','now')) where githash in (%s)" % svc_sql)
 
-      # Do the SQL call to find the service to use.
-      # TODO: we need some sort of a fair scheduling scheme. The current scheme is 
+      # Atomically claim the highest-priority 'ready' ticket for one of these services.
+      # A single UPDATE...WHERE...RETURNING (rather than SELECT then UPDATE) avoids a
+      # race between concurrent claim requests under SQLite.
+      # TODO: we need some sort of a fair scheduling scheme. The current scheme is
       # pretty ridiculous
       res = db.query(
-        "select id from tickets "
-        "where service_githash in (%s) "
+        "update tickets set status = 'claimed' "
+        "where id = (select id from tickets "
+        "            where service_githash in (%s) and status = 'ready' "
+        "            order by id asc limit 1) "
         "  and status = 'ready' "
-        "order by id asc limit 1" % svc_sql)
+        "returning id" % svc_sql)
 
       # Nothing returned? Means there are no ready tickets
-      if len(res) == 0:
+      if not res:
         return None
 
       # Now we have a ticket
@@ -1011,7 +1069,7 @@ class ServiceLogic:
       "  and PS.provider_name = PA.provider"
       "  and user_id = $user_id",
       vars=locals());
-    return len(res) > 0
+    return bool(res)
 
   def claim_ticket(self, user_id, provider_name, provider_code):
 
@@ -1019,19 +1077,23 @@ class ServiceLogic:
     with db.transaction():
 
       # Update the ping on this service
-      db.query("update services set pingtime=now() where githash = $self.service_githash", vars = locals());
+      db.query("update services set pingtime=(strftime('%s','now')) where githash = $self.service_githash", vars = locals());
 
-      # Get the highest priority 'ready' ticket. TODO: For now the priority is just based
-      # on the ticket serial number, but this will need to be updated to use an actual
-      # prioritization system in the future
+      # Atomically claim the highest-priority 'ready' ticket for this service. A single
+      # UPDATE...WHERE...RETURNING (rather than SELECT then UPDATE) avoids a race between
+      # concurrent claim requests under SQLite.
+      # TODO: For now the priority is just based on the ticket serial number, but this
+      # will need to be updated to use an actual prioritization system in the future
       res = db.query(
-          "select T.id from tickets T "
-          "where T.service_githash = $self.service_githash "
-          "  and T.status = 'ready' "
-          "order by T.id asc limit 1", vars=locals());
+          "update tickets set status = 'claimed' "
+          "where id = (select id from tickets "
+          "            where service_githash = $self.service_githash and status = 'ready' "
+          "            order by id asc limit 1) "
+          "  and status = 'ready' "
+          "returning id", vars=locals());
 
       # Nothing returned? Means there are no ready tickets
-      if len(res) == 0:
+      if not res:
         return None
 
       # Now we have a ticket
@@ -1079,7 +1141,7 @@ def query_as_json(qresult, fields):
   return json.dumps({"result" : darray}, default=my_json_converter)
 
 def query_as_csv(qresult, fields):
-  strout = StringIO.StringIO()
+  strout = io.StringIO()
   csvout = csv.DictWriter(strout, fieldnames=fields, extrasaction='ignore')
   csvout.writerows(qresult)
   return strout.getvalue()
@@ -1093,16 +1155,16 @@ def query_as_reqfmt(qresult, fields):
     return query_as_csv(qresult, fields)
 
 def directory_as_csv(dir_path):
-  files = filter(os.path.isfile, glob.glob(dir_path + "/*"))
+  files = list(filter(os.path.isfile, glob.glob(dir_path + "/*")))
   files.sort(key=lambda x: os.path.getmtime(x))
   table = [(i,os.path.basename(files[i])) for i in range(len(files))]
-  strout = StringIO.StringIO()
+  strout = io.StringIO()
   csvout = csv.writer(strout)
   csvout.writerows(table)
   return strout.getvalue()
 
 def get_indexed_file(dir_path, index):
-  files = filter(os.path.isfile, glob.glob(dir_path + "/*"))
+  files = list(filter(os.path.isfile, glob.glob(dir_path + "/*")))
   files.sort(key=lambda x: os.path.getmtime(x))
   if index >= 0 and index < len(files):
     return files[index]
@@ -1130,19 +1192,23 @@ class AbstractAPI(object):
     if 'githash' in web.input():
       return web.input().githash
 
-    # If name specified, find the latest service
+    # If name specified, find the latest service (highest dotted version, e.g. 1.2.3)
     if 'name' in web.input():
       name = web.input().name
-      qresult = db.query(
-        "select to_number(split_part(version,'.',1),'999') as major, "
-        "       to_number(split_part(version,'.',2),'999') as minor, "
-        "       to_number(split_part(version,'.',3),'999') as patch, "
-        "       githash from services where name=$name "
-        "order by major desc,minor desc,patch desc limit 1", vars=locals());
-      if len(qresult) == 1:
-        return qresult[0].githash
-      else:
+      qresult = list(db.select("services", where="name=$name", vars=locals()))
+      if len(qresult) == 0:
         self.raise_badrequest("Unable to find service named %s" % name)
+
+      def version_key(row):
+        def to_int(x):
+          try:
+            return int(x)
+          except ValueError:
+            return 0
+        parts = ((row.version or '').split('.') + ['0','0','0'])[:3]
+        return tuple(to_int(p) for p in parts)
+
+      return max(qresult, key=version_key).githash
 
     # What do we do?
     self.raise_badrequest("Unable to find service: neither name nor githash specified")
@@ -1164,13 +1230,13 @@ class OAuthCallbackAPI:
 
     # Create an account for the user with credential information
     res = db.select('users', where="email=$email", vars=locals())
-    if len(res) > 0:
+    if res:
       stored_user_data = res[0]
       alfabis_id = stored_user_data.id
-      is_admin = stored_user_data.sysadmin
+      is_admin = bool(stored_user_data.sysadmin)
     else:
-      passwd=os.urandom(24).encode('hex')
-      print user_info
+      passwd=os.urandom(24).hex()
+      print(user_info)
       alfabis_id = db.insert('users', email=email, passwd=passwd, dispname=user_info.get("name"))
       is_admin = False
 
@@ -1204,16 +1270,16 @@ class LoginAPI (AbstractAPI):
     token = web.input().token
     res = db.select('users', where='passwd=$token', vars=locals())
 
-    if len(res) > 0:
+    if res:
       user_data = res[0];
       sess.loggedin = True
       sess.user_id = user_data.id
       sess.email = user_data.email
-      sess.is_admin = user_data.sysadmin
+      sess.is_admin = bool(user_data.sysadmin)
 
       # Now that the user has used the token, generate a new token (so that there
       # is no security risk from sharing tokens)
-      new_token=os.urandom(24).encode('hex')
+      new_token=os.urandom(24).hex()
       db.update("users", where="passwd=$token", passwd = new_token, vars=locals())
 
       return self.response()
@@ -1242,7 +1308,7 @@ class ServicesDetailAPI (AbstractAPI):
     self.check_auth()
 
     qresult = db.select("services", where="githash=$githash",vars=locals())
-    if len(qresult) == 0:
+    if not qresult:
       self.raise_badrequest("Service %s is not available" % githash)
     json = qresult[0].json
     web.header('Content-Type','application/json')
@@ -1262,10 +1328,10 @@ class ServicesStatsAPI (AbstractAPI):
 
     # Get the number of successful and failed tickets in the last 24 hours
     q1 = db.query(
-      "select greatest(0,sum(cast (TH.status = 'success' as int))) as n_success, "
-      "       greatest(0,sum(cast (TH.status in ( 'failed', 'timeout') as int))) as n_failed "
+      "select max(0,coalesce(sum(TH.status = 'success'),0)) as n_success, "
+      "       max(0,coalesce(sum(TH.status in ( 'failed', 'timeout')),0)) as n_failed "
       "from ticket_history TH, tickets T where TH.ticket_id = T.id "
-      "     and now() - atime < interval '24 hours' "
+      "     and strftime('%s','now') - atime < 86400 "
       "     and service_githash = $githash", vars=locals())[0];
 
     retval['n_success'] = q1.n_success
@@ -1277,26 +1343,26 @@ class ServicesStatsAPI (AbstractAPI):
         "select avg(runtime) as avg_duration "
         "from success_ticket_duration "
         "where service_githash = $githash "
-        "      and now() - endtime < interval '24 hours'", vars=locals());
+        "      and strftime('%s','now') - endtime < 86400", vars=locals());
 
       retval['avg_duration'] = q2[0].avg_duration
 
     # Get the last time we heard from this service
     q3 = db.query(
-      "select now() - pingtime as deltat "
+      "select strftime('%s','now') - pingtime as deltat "
       "from services where githash=$githash", vars=locals());
     retval['last_heard_from'] = q3[0].deltat
 
     # Get the size of the queue for this service (all tickets in ready state)
     q4 = db.query(
-      "select count(id) from tickets "
+      "select count(id) as count from tickets "
       "where service_githash=$githash "
       "      and status = 'ready'", vars=locals());
     retval['queue_length'] = q4[0].count
 
     # Return the results in requested format
-    print retval
-    return query_as_reqfmt([retval], retval.keys())
+    print(retval)
+    return query_as_reqfmt([retval], list(retval.keys()))
       
 
     #except:
@@ -1363,13 +1429,13 @@ class TicketsAPI (TicketsAPIBase):
     githash = self.get_service_githash()
 
     # Make sure the service exists
-    res_svc = db.select("services",where="githash=$githash",vars=locals())
+    res_svc = list(db.select("services",where="githash=$githash",vars=locals()))
     if len(res_svc) != 1:
-      self.raise_badrequest("Service %s is not available" % service_name)
+      self.raise_badrequest("Service %s is not available" % githash)
 
     # Make sure that the user is allowed to create more tickets
     user_id = sess.user_id;
-    n_tickets = db.query("select count(id) from tickets where user_id=$user_id and status <> 'deleted'", 
+    n_tickets = db.query("select count(id) as count from tickets where user_id=$user_id and status <> 'deleted'",
                          vars=locals())[0].count;
     n_allowed = db.query("select max_tickets from users U, user_tiers T where U.id = $user_id and U.tier = T.tier",
                          vars=locals())[0].max_tickets;
@@ -1829,26 +1895,28 @@ class ProviderTicketAttachmentAPI (ProviderAPIBase):
     # To post to the log, we must have claimed this ticket
     self.check_ticket_claimed(ticket_id)
 
+    # Read the input ONCE: web.py's multipart parser reads the (non-seekable)
+    # request body stream on each web.input() call, so calling it more than
+    # once per request silently empties the uploaded file on later calls.
+    x = web.input(myfile={})
+
     # Get the description
-    if "desc" not in web.input():
+    if "desc" not in x:
       self.raise_badrequest("Missing attachment description for log entry %d", log_id)
 
     # Mime type is optional
     mime_type = None
-    if "mime_type" in web.input():
-      mime_type = web.input().mime_type
+    if "mime_type" in x:
+      mime_type = x.mime_type
 
-    # Read the input
-    x = web.input(myfile={})
-    
     # Create an entry for the attachment in the database
-    filepath=x.myfile.filename.replace('\\','/') 
-    filename=filepath.split('/')[-1] 
+    filepath=x.myfile.filename.replace('\\','/')
+    filename=filepath.split('/')[-1]
     tlogic = TicketLogic(ticket_id)
-    (aid, ahash, afile) = tlogic.add_attachment(web.input().desc, filename, mime_type)
+    (aid, ahash, afile) = tlogic.add_attachment(x.desc, filename, mime_type)
 
     # Store the attachment
-    fout = open(afile,'w') # creates the file where the uploaded file should be stored
+    fout = open(afile,'wb') # creates the file where the uploaded file should be stored
     fout.write(x.myfile.file.read()) # writes the uploaded file to the newly created file.
     fout.close() # closes the file, upload complete.
 
@@ -1893,14 +1961,14 @@ class DirectDownloadAPI (AbstractAPI):
     res = db.select("ticket_attachment", where="uuid like $pattern", vars=locals());
 
     # Did we find a blob?
-    if len(res) == 0:
+    if not res:
       self.raise_badrequest("Resource %s not found" % hashstr)
 
     # Get the dict for the first row
     row = res[0]
 
     # The directory of the file
-    filedir = 'datastore/attachments/%08d' % int(row.ticket_id)
+    filedir = '%s/attachments/%08d' % (datastore_root, int(row.ticket_id))
 
     # Find the file in the directory
     for file in os.listdir(filedir):
@@ -1918,7 +1986,7 @@ class AdminAbstractAPI(AbstractAPI):
     super(AdminAbstractAPI,self).check_auth()
     email = sess.email
     res = db.select('users', where="email=$email", vars=locals())
-    if res[0].sysadmin is not True:
+    if not res[0].sysadmin:
       self.raise_unauthorized("Insufficient privileges")
 
 
@@ -1977,7 +2045,7 @@ class AdminProviderUsersAPI(AdminAbstractAPI):
     if 'admin' in web.input():
       isadmin=int(web.input().admin)
 
-    res = db.select('users', where="email=$email", vars=locals())
+    res = list(db.select('users', where="email=$email", vars=locals()))
     if len(res) != 1:
       self.raise_unauthorized('Email unrecognized by the system')
     user_id = res[0].id
@@ -2047,7 +2115,7 @@ class AdminProviderServicesAPI(AdminAbstractAPI):
     # Check if the service clashes with an existing service. In that case
     # we reject this update
     q_clash=db.query(
-      "select count(githash) from services "
+      "select count(githash) as count from services "
       "where name=$j['name'] and version=$j['version'] and current=TRUE "
       "      and githash <> $githash ", vars=locals())
 
@@ -2061,19 +2129,20 @@ class AdminProviderServicesAPI(AdminAbstractAPI):
       # that the attributes of a service stay fixed if the githash has not changed, which
       # is the basic assumption with using git!
       jdump = json.dumps(j)
+      shortdesc = j['shortdesc'][:78]
       db.query(
-        "insert into services "
-        "    values ($j['name'], $githash, $j['version'], left($j['shortdesc'],78), $jdump) "
+        "insert into services (name,githash,version,shortdesc,json) "
+        "    values ($j['name'], $githash, $j['version'], $shortdesc, $jdump) "
         "    on conflict (githash) do update set current = true ", vars = locals());
 
       # Assign the service to the provider
       db.query(
-        "insert into provider_services values($provider, $githash) "
+        "insert into provider_services (provider_name, service_githash) values($provider, $githash) "
         "    on conflict (provider_name, service_githash) "
         "    do update set current = true", vars=locals())
 
     # Create a copy of the repo in the datastore directory
-    saved_dir = 'datastore/services/%s' % githash
+    saved_dir = '%s/services/%s' % (datastore_root, githash)
     if not os.path.exists(saved_dir):
       os.makedirs(saved_dir)
       repo.clone(os.path.abspath(saved_dir))
@@ -2110,7 +2179,7 @@ class AdminTicketsAPI(AdminAbstractAPI):
     qresult = db.query(
       "select T.id, T.status, U.email, "
       "       case when S.name is null then T.service_githash else S.name end as service, "
-      "       round(extract(epoch from max(TH.atime) - min(TH.atime)) / 60) as duration  "
+      "       round((max(TH.atime) - min(TH.atime)) / 60.0) as duration  "
       "from tickets T "
       "       left join services S on T.service_githash = S.githash "
       "       left join users U on T.user_id = U.id "
@@ -2130,11 +2199,11 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
 
     # Check the number of days to purge
     if 'days' in web.input():
-      interval="%f days" % float(web.input().days)
+      purge_seconds = float(web.input().days) * 86400
     elif 'hours' in web.input():
-      interval="%f hours" % float(web.input().hours)
+      purge_seconds = float(web.input().hours) * 3600
     else:
-      interval="7 days"
+      purge_seconds = 7 * 86400
 
     # What kinds of tickets to purge (completed or all)
     if ticket_mode == 'completed':
@@ -2143,17 +2212,17 @@ class AdminPurgeTicketsAPI(AdminAbstractAPI):
       status_list="('failed','success','timeout','init','ready','claimed')"
 
     # List the tickets that can be purged
-    qresult = db.query(
+    qresult = list(db.query(
       "select T.id,H.atime,T.status from tickets T, ticket_history H "
       "where T.id = H.ticket_id and T.status in %s "
-      "  and H.status = 'init' and now() - H.atime > interval $interval" % status_list,
-      vars=locals());
+      "  and H.status = 'init' and strftime('%%s','now') - H.atime > $purge_seconds" % status_list,
+      vars=locals()));
 
     # Purge each of the tickets in the list
     for row in qresult:
       TicketLogic(row.id).delete_ticket()
 
-    # Get the list of tickets 
+    # Get the list of tickets
     return "Purged %d tickets" % len(qresult)
 
 
@@ -2166,7 +2235,9 @@ pargs = parser.parse_args();
 
 # Which action to take
 if pargs.server:
-  sys.argv = [str(pargs.port)]
+  # web.py's app.run() reads the port from sys.argv[1:], with sys.argv[0] treated
+  # as the program name -- so the port string must be at index 1, not 0.
+  sys.argv = [sys.argv[0], str(pargs.port)]
   app.run()
 else:
   application=app.wsgifunc()

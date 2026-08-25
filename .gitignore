@@ -10,3 +10,7 @@ runme_ssl.sh
 uwsgi.ini
 catalog
 *~
+__pycache__/
+.pytest_cache/
+*.sqlite3
+.venv/

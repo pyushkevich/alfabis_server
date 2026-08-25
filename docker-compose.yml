@@ -1,28 +1,20 @@
 version: '3'
 services:
-  db:
-    build:
-      context: .
-      dockerfile: ./docker/db/Dockerfile
   app:
     build:
       context: .
       dockerfile: ./docker/web/Dockerfile
     ports:
       - "8080:8080"
-    depends_on:
-      - db
-    links:
-      - db
     environment:
-      - POSTGRES_PORT_5432_TCP_ADDR=db
-      - POSTGRES_PORT_5432_TCP_PORT=5432
-      - ALFABIS_DATABASE_NAME=alfabis_db
-      - ALFABIS_DATABASE_USERNAME=alfabis_user
-      - ALFABIS_DATABASE_PASSWORD=
+      - ALFABIS_SQLITE_PATH=/app/data/alfabis.sqlite3
       - ALFABIS_NOAUTH=1
+    volumes:
+      - alfabis-data:/app/data
     working_dir: /app/alfabis_server
-    command: ["/app/wait-for-it.sh", "db:5432", "--", "python", "app.py", "--server"]
+    # Initialize the SQLite schema only if the database file doesn't exist yet,
+    # so restarting the container doesn't wipe a persistent volume's data.
+    command: ["sh", "-c", "test -f \"$ALFABIS_SQLITE_PATH\" || sqlite3 \"$ALFABIS_SQLITE_PATH\" < sql/init_db_sqlite.sql; exec python app.py --server"]
   service:
     build:
       context: .
@@ -34,3 +26,6 @@ services:
     environment:
       - DSS_URL=http://app:8080
       - DSS_SERVICE_HASH=e0a316038e9cbe6a000e07c82758532a8863f51f
+
+volumes:
+  alfabis-data:
