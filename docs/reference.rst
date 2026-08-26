@@ -256,3 +256,18 @@ DirectDownloadAPI
 ------------
 StaticFileAPI: serves the server's bundled CSS/JS/image assets (used by the HTML pages above). No authentication required.
 
+
+Command-Line Administration
+============================
+The middleware server also exposes a small set of administrative commands through the ``itksnap-dss-server`` console script, for tasks that can't go through the web UI.
+
+``itksnap-dss-server set-sysadmin <email>``
+--------------------------------------------
+Grants sysadmin privileges to an existing user, identified by the email address they logged in with. Sysadmin status is otherwise only grantable by an *existing* sysadmin through the ``/admin`` web pages, which makes bootstrapping the very first sysadmin on a new deployment impossible through the UI alone -- this command is that bootstrap path. The user must have logged in at least once (so their row exists in the database) before this command can find them; if not, it exits with an error rather than silently doing nothing.
+
+This command operates on the same SQLite database the running server uses, resolved the same way as the server itself (``--sqlite-path`` / ``ALFABIS_SQLITE_PATH``), so it's safe to run directly against a live deployment.
+
+``itksnap-dss-server unset-sysadmin <email>``
+-----------------------------------------------
+Revokes sysadmin privileges from a user.
+
