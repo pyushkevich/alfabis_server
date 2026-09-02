@@ -782,9 +782,8 @@ class TicketLogic:
     filepath=fileobj.filename.replace('\\','/') # replaces the windows-style slashes with linux ones.
     filename=filepath.split('/')[-1] # splits the and chooses the last part (the filename with extension)
     
-    fout = open(filedir +'/'+ filename,'wb') # creates the file where the uploaded file should be stored
-    fout.write(fileobj.file.read()) # writes the uploaded file to the newly created file.
-    fout.close() # closes the file, upload complete.
+    with open(filedir +'/'+ filename,'wb') as fout: # creates the file where the uploaded file should be stored
+      shutil.copyfileobj(fileobj.file, fout) # streams the uploaded file to the newly created file.
 
     # Return the local path to file
     return filename
@@ -1929,9 +1928,8 @@ class ProviderTicketAttachmentAPI (ProviderAPIBase):
     (aid, ahash, afile) = tlogic.add_attachment(x.desc, filename, mime_type)
 
     # Store the attachment
-    fout = open(afile,'wb') # creates the file where the uploaded file should be stored
-    fout.write(x.myfile.file.read()) # writes the uploaded file to the newly created file.
-    fout.close() # closes the file, upload complete.
+    with open(afile,'wb') as fout: # creates the file where the uploaded file should be stored
+      shutil.copyfileobj(x.myfile.file, fout) # streams the uploaded file to the newly created file.
 
     # Return the aid
     return aid
