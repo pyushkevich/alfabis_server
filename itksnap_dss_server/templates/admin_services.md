@@ -94,7 +94,7 @@ DSS Providers and Services
     </div>
     <div class="pure-control-group">
       <label for="repo">Git Repository:</label>
-      <input type="url" name="repo">
+      <input type="url" name="repo" style="width:500px">
     </div>
     <div class="pure-control-group">
       <label for="ref">Reference:</label>
