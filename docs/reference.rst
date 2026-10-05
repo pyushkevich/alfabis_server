@@ -176,10 +176,6 @@ TicketLogAttachmentAPI
 -----------------
 ProviderServicesAPI
 
-/api/pro/services/([\w\-]+)/tickets
------------------------------------
-ProviderServiceTicketsAPI
-
 /api/pro/services/([a-f0-9]+)/claims
 ------------------------------------
 ProviderServiceClaimsAPI

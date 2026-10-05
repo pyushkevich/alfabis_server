@@ -106,7 +106,6 @@ urls = (
   r"/api/tickets/(\d+)/retry", "TicketRetryAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
-  r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
   r"/api/pro/services/([a-f0-9]+)/claims", "ProviderServiceClaimsAPI",
   r"/api/pro/services/claims", "ProviderMultipleServiceClaimsAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)", "ProviderTicketFilesAPI",
@@ -1711,41 +1710,6 @@ class ProviderServicesAPI (ProviderAPIBase):
         vars=locals());
 
     return query_as_reqfmt(qresult, ['name','version','githash','provider'])
-
-
-class ProviderServiceTicketsAPI (ProviderAPIBase):
-
-  # List all the tickets (tickets)
-  def GET(self, service_name):
-    
-    # The user must have access to the service name
-    self.check_service_access_by_githash(service_name)
-
-    # List all of the tickets that are available under this service
-    user_id = sess.user_id
-    qresult = db.query(
-        "select T.* from tickets T, services S "
-        "where T.service_id = S.id and S.name = $service_name",
-        vars=locals());
-
-    return query_as_reqfmt(qresult, ['id','status'])
-
-class ProviderServiceTicketsAPI (ProviderAPIBase):
-
-  # List all the tickets (tickets)
-  def GET(self, service_name):
-    
-    # The user must have access to the service name
-    self.check_service_access_by_githash(service_name)
-
-    # List all of the tickets that are available under this service
-    user_id = sess.user_id
-    qresult = db.query(
-        "select T.* from tickets T, services S "
-        "where T.service_id = S.id and S.name = $service_name",
-        vars=locals());
-
-    return query_as_reqfmt(qresult, ['id','status'])
 
 
 class ProviderServiceClaimsAPI (ProviderAPIBase):
