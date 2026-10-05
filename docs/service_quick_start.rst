@@ -277,6 +277,8 @@ The "useful" output of this command is on the line that starts with ``1>``. In g
 
 .. note:: You can call ``-dssp-services-claim`` with a comma-separated list of service hash codes. In this case, the DSS server will return the highest-priority ticket across all these services. You can use the second field in the output of ``-dssp-services-claim`` to figure out which service that ticket belongs to.
 
+.. note:: If your provider needs to acquire a resource (such as a GPU) before it can process a ticket, it can first ask which services have tickets waiting, without claiming any of them, by sending a ``POST`` request to ``/api/pro/services/available`` with the same comma-separated ``services`` parameter. The server returns one line per service that has tickets ready to claim, in the order in which they would be claimed, with the service hash code, the service name, and the number of ready tickets. The tickets stay in the queue, so another provider may claim them before you do. Once the resource is ready, claim as usual and handle the case where no ticket is returned.
+
 Downloading Ticket Workspace
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

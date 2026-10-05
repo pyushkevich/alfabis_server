@@ -106,9 +106,9 @@ urls = (
   r"/api/tickets/(\d+)/retry", "TicketRetryAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
-  r"/api/pro/services/([\w\-]+)/tickets", "ProviderServiceTicketsAPI",
   r"/api/pro/services/([a-f0-9]+)/claims", "ProviderServiceClaimsAPI",
   r"/api/pro/services/claims", "ProviderMultipleServiceClaimsAPI",
+  r"/api/pro/services/available", "ProviderMultipleServiceAvailableAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)", "ProviderTicketFilesAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)/(\d+)", "ProviderTicketFileDownloadAPI",
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
@@ -1713,41 +1713,6 @@ class ProviderServicesAPI (ProviderAPIBase):
     return query_as_reqfmt(qresult, ['name','version','githash','provider'])
 
 
-class ProviderServiceTicketsAPI (ProviderAPIBase):
-
-  # List all the tickets (tickets)
-  def GET(self, service_name):
-    
-    # The user must have access to the service name
-    self.check_service_access_by_githash(service_name)
-
-    # List all of the tickets that are available under this service
-    user_id = sess.user_id
-    qresult = db.query(
-        "select T.* from tickets T, services S "
-        "where T.service_id = S.id and S.name = $service_name",
-        vars=locals());
-
-    return query_as_reqfmt(qresult, ['id','status'])
-
-class ProviderServiceTicketsAPI (ProviderAPIBase):
-
-  # List all the tickets (tickets)
-  def GET(self, service_name):
-    
-    # The user must have access to the service name
-    self.check_service_access_by_githash(service_name)
-
-    # List all of the tickets that are available under this service
-    user_id = sess.user_id
-    qresult = db.query(
-        "select T.* from tickets T, services S "
-        "where T.service_id = S.id and S.name = $service_name",
-        vars=locals());
-
-    return query_as_reqfmt(qresult, ['id','status'])
-
-
 class ProviderServiceClaimsAPI (ProviderAPIBase):
 
   # List all the claimed tickets for this service
@@ -1809,6 +1774,38 @@ class ProviderMultipleServiceClaimsAPI (ProviderAPIBase):
     qresult = ClaimLogic(sess.user_id, provider_name, provider_code).claim_multiservice(svclist)
     if qresult is not None:
       return query_as_reqfmt(qresult, ['id', 'service_githash', 'status'])
+
+
+class ProviderMultipleServiceAvailableAPI (ProviderAPIBase):
+
+  # The caller passes in a comma-separated list of services. The server returns the
+  # services that currently have 'ready' tickets, in the order in which claims would
+  # be served (same priority as ClaimLogic.claim_multiservice), without claiming
+  # anything. This lets a provider allocate resources (e.g., a GPU) before claiming,
+  # while leaving the tickets in the queue. There is no reservation: by the time the
+  # provider claims, another provider may have taken the ticket.
+  def POST(self):
+
+    if "services" not in web.input():
+      self.raise_badrequest("Missing 'services' parameter")
+
+    svclist = web.input().services.split(',')
+    for svc in svclist:
+      self.check_service_access_by_githash(svc)
+
+    # Polling for work counts as the provider being alive, same as claiming
+    db.update("services", where="githash in $svclist",
+              pingtime=web.SQLLiteral("strftime('%s','now')"), vars=locals())
+
+    qresult = db.query(
+      "select T.service_githash, S.name as service_name, count(*) as ready_tickets "
+      "from tickets T join services S on S.githash = T.service_githash "
+      "where T.status = 'ready' and T.service_githash in $svclist "
+      "group by T.service_githash, S.name "
+      "order by min(T.id) asc",
+      vars=locals())
+
+    return query_as_reqfmt(qresult, ['service_githash', 'service_name', 'ready_tickets'])
 
 
 class ProviderTicketStatusAPI (ProviderAPIBase):
