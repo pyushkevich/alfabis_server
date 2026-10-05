@@ -184,6 +184,10 @@ ProviderServiceClaimsAPI
 ------------------------
 ProviderMultipleServiceClaimsAPI
 
+/api/pro/services/available
+---------------------------
+ProviderMultipleServiceAvailableAPI
+
 /api/pro/tickets/(\d+)/files/(input|results)
 --------------------------------------------
 ProviderTicketFilesAPI
