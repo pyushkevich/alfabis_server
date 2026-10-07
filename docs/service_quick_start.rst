@@ -151,7 +151,7 @@ The first part of the ``service.json`` file describes the service at various lev
 
 .. note:: See the reference manual for details on :ref:`refman_service_json`.
 
-Before proceeding, make sure your Json syntax is correct. Use an online validator, such as https://jsonformatter.org or https://jsonlint.com to check for errors. 
+Before proceeding, make sure your JSON syntax is correct. Use an online validator, such as https://jsonviewertool.com/json-validator, https://jsonformatter.org, or https://jsonlint.com to check for errors.
 
 .. warning:: If your ``service.json`` file contains invalid syntax, you will receive errors in later stages of the tutorial!
 
