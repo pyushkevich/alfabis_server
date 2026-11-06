@@ -279,6 +279,8 @@ The "useful" output of this command is on the line that starts with ``1>``. In g
 
 .. note:: If your provider needs to acquire a resource (such as a GPU) before it can process a ticket, it can first ask which services have tickets waiting, without claiming any of them, by sending a ``POST`` request to ``/api/pro/services/available`` with the same comma-separated ``services`` parameter. The server returns one line per service that has tickets ready to claim, in the order in which they would be claimed, with the service hash code, the service name, and the number of ready tickets. The tickets stay in the queue, so another provider may claim them before you do. Once the resource is ready, claim as usual and handle the case where no ticket is returned.
 
+.. note:: If your provider hands tickets to a batch queue such as SLURM, where a job may not start right away, it can claim a ticket *temporarily* by adding a ``timeout`` parameter (in seconds) to the claim request, e.g. ``timeout=60``. If the claim is not renewed before the timeout runs out, the ticket returns to the queue, and other providers can claim it. Once your job actually starts working on the ticket, it should make the claim permanent by sending a ``POST`` request to ``/api/pro/tickets/<ticket_id>/claim`` with the ``provider`` (and optionally ``code``) parameter. To extend a temporary claim instead, include ``timeout`` in that request as well. Renewal fails (HTTP 400) if your claim has already expired, even if no other provider has claimed the ticket yet. A provider whose claim has expired can no longer download files, post logs or progress, or set the status of that ticket.
+
 Downloading Ticket Workspace
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -196,6 +196,10 @@ ProviderTicketFilesAPI
 --------------------------------------------------
 ProviderTicketFileDownloadAPI
 
+/api/pro/tickets/(\d+)/claim
+----------------------------
+ProviderTicketClaimAPI
+
 /api/pro/tickets/(\d+)/status
 -----------------------------
 ProviderTicketStatusAPI
