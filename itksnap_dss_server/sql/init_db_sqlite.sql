@@ -106,7 +106,10 @@ create table claim_history
   provider text,
   puser_id integer references users(id),
   provider_code text,
-  atime integer not null default (strftime('%s','now'))
+  atime integer not null default (strftime('%s','now')),
+  /* Epoch seconds at which a temporary claim lapses and the ticket returns to
+     'ready'; null for a permanent claim. Only the latest claim of a ticket counts. */
+  expires integer default null
 );
 
 drop table if exists ticket_progress;

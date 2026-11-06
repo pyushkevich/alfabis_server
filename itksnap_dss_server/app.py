@@ -111,6 +111,7 @@ urls = (
   r"/api/pro/services/available", "ProviderMultipleServiceAvailableAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)", "ProviderTicketFilesAPI",
   r"/api/pro/tickets/(\d+)/files/(input|results)/(\d+)", "ProviderTicketFileDownloadAPI",
+  r"/api/pro/tickets/(\d+)/claim", "ProviderTicketClaimAPI",
   r"/api/pro/tickets/(\d+)/status", "ProviderTicketStatusAPI",
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
@@ -637,10 +638,16 @@ class TicketLogic:
     res = db.select("tickets",where="id=$self.ticket_id", vars=locals())
     return bool(res) and (res[0].status != 'deleted')
 
-  # Check that the specified provider has actually claimed this ticket
+  # Check that the specified provider holds the ticket's most recent claim, and
+  # that the claim has not expired. A provider whose temporary claim lapsed (or
+  # whose ticket was then claimed by someone else) no longer has access.
   def check_provider_claimed(self, user_id):
-    res = db.select("claim_history",
-      where="ticket_id=$self.ticket_id and puser_id=$user_id",
+    now = int(time.time())
+    res = db.query(
+      "select id from claim_history "
+      "where id = (select max(id) from claim_history where ticket_id = $self.ticket_id) "
+      "  and puser_id = $user_id "
+      "  and (expires is null or expires > $now)",
       vars=locals());
     return bool(res)
 
@@ -1019,7 +1026,103 @@ class ClaimLogic:
   def __init__(self, user_id, provider_name, provider_code):
     (self.user_id, self.provider_name, self.provider_code) = (user_id, provider_name, provider_code)
 
-  def claim_multiservice(self, service_githash_list):
+  # Return to 'ready' every claimed ticket whose most recent claim is temporary
+  # and has expired. Expiration is applied lazily: this is called before any
+  # operation that claims tickets or reports on the ready queue to providers.
+  @staticmethod
+  def release_expired_claims():
+    now = int(time.time())
+    with db.transaction():
+      # A single UPDATE...RETURNING so that concurrent callers cannot both
+      # release (and log) the same ticket
+      res = list(db.query(
+        "update tickets set status = 'ready' "
+        "where status = 'claimed' and id in ( "
+        "  select C.ticket_id from claim_history C "
+        "  where C.expires is not null and C.expires <= $now "
+        "    and C.id = (select max(id) from claim_history where ticket_id = C.ticket_id)) "
+        "returning id", vars=locals()))
+
+      for row in res:
+        ticket_id = row.id
+        tl = TicketLogic(ticket_id)
+        db.insert("ticket_history", ticket_id=ticket_id, status="ready")
+        db.delete("ticket_progress", where="ticket_id=$ticket_id", vars=locals())
+        tl.erase_dir("results")
+        tl.append_log("info", "Temporary claim expired, ticket returned to the queue")
+
+      return [row.id for row in res]
+
+  # Create a claim_history entry for a newly claimed ticket and log it
+  @staticmethod
+  def record_claim(ticket_id, user_id, provider_name, provider_code, timeout):
+    expires = int(time.time()) + timeout if timeout is not None else None
+    db.insert("claim_history",
+              ticket_id=ticket_id,
+              provider=provider_name,
+              provider_code=provider_code,
+              puser_id=user_id,
+              expires=expires)
+
+    tl = TicketLogic(ticket_id)
+    tl.set_status("claimed")
+    if timeout is None:
+      tl.append_log("info", "Ticket claimed by provider %s instance %s"
+                    % (provider_name, provider_code))
+    else:
+      tl.append_log("info", "Ticket temporarily claimed by provider %s instance %s for %d seconds"
+                    % (provider_name, provider_code, timeout))
+
+  # Claim a specific ticket, e.g., when a job queued under a temporary claim starts
+  # working on it. With timeout=None the claim becomes permanent (the ticket is
+  # being worked on); otherwise it expires timeout seconds from now. Succeeds if:
+  #   - the ticket's latest claim is a live temporary claim held by this provider
+  #     instance (same user, provider and provider code): the claim is renewed;
+  #   - or the ticket is 'ready' (e.g., the temporary claim lapsed and nobody else
+  #     took it): the ticket is claimed anew.
+  # Fails if the ticket is permanently claimed (by anyone, including this caller,
+  # so that only one job can start working on a ticket), temporarily claimed by
+  # another provider instance, or in any other state. Returns True on success.
+  def renew_claim(self, ticket_id, timeout):
+    with db.transaction():
+      ClaimLogic.release_expired_claims()
+
+      now = int(time.time())
+      expires = now + timeout if timeout is not None else None
+      (user_id, provider_name, provider_code) = (self.user_id, self.provider_name, self.provider_code)
+
+      # Renew this instance's live temporary claim
+      res = db.query(
+        "update claim_history set expires = $expires "
+        "where id = (select max(id) from claim_history where ticket_id = $ticket_id) "
+        "  and puser_id = $user_id and provider = $provider_name "
+        "  and provider_code = $provider_code "
+        "  and expires is not null and expires > $now "
+        "  and exists (select 1 from tickets where id = $ticket_id and status = 'claimed') "
+        "returning id", vars=locals())
+      if res:
+        if timeout is None:
+          TicketLogic(ticket_id).append_log("info", "Ticket claimed by provider %s instance %s"
+                                            % (provider_name, provider_code))
+        else:
+          TicketLogic(ticket_id).append_log("info",
+              "Temporary claim by provider %s instance %s extended for %d seconds"
+              % (provider_name, provider_code, timeout))
+        return True
+
+      # Otherwise, claim the ticket if it is back in the queue. As with the other
+      # claims, a single atomic UPDATE...RETURNING so that only one caller wins.
+      res = db.query(
+        "update tickets set status = 'claimed' "
+        "where id = $ticket_id and status = 'ready' "
+        "returning id", vars=locals())
+      if res:
+        ClaimLogic.record_claim(ticket_id, user_id, provider_name, provider_code, timeout)
+        return True
+
+      return False
+
+  def claim_multiservice(self, service_githash_list, timeout=None):
 
     # Put the services back together into a SQL passable string
     svc_sql =  ",".join("'{0}'".format(w) for w in service_githash_list)
@@ -1028,6 +1131,9 @@ class ClaimLogic:
 
       # Update the ping on all services
       db.query("update services set pingtime=(strftime('%%s','now')) where githash in (%s)" % svc_sql)
+
+      # Return any tickets with lapsed temporary claims to the queue
+      ClaimLogic.release_expired_claims()
 
       # Atomically claim the highest-priority 'ready' ticket for one of these services.
       # A single UPDATE...WHERE...RETURNING (rather than SELECT then UPDATE) avoids a
@@ -1048,21 +1154,10 @@ class ClaimLogic:
 
       # Now we have a ticket
       ticket_id = res[0].id
-      tl = TicketLogic(ticket_id)
 
-      # Make an entry in the claims table, to keep track of this claim
-      db.insert("claim_history", 
-                ticket_id=ticket_id, 
-                provider=self.provider_name, 
-                provider_code=self.provider_code,
-                puser_id=self.user_id)
-
-      # Mark the ticket as claimed
-      tl.set_status("claimed")
-
-      # Update the log for the user
-      tl.append_log("info", "Ticket claimed by provider %s instance %s" 
-                    % (self.provider_name,self.provider_code))
+      # Record the claim, mark the ticket as claimed and log it for the user
+      ClaimLogic.record_claim(ticket_id, self.user_id, self.provider_name,
+                              self.provider_code, timeout)
 
       # Return the ticket id and service hash
       return db.select("tickets", where="id=$ticket_id", vars=locals())
@@ -1083,13 +1178,16 @@ class ServiceLogic:
       vars=locals());
     return bool(res)
 
-  def claim_ticket(self, user_id, provider_name, provider_code):
+  def claim_ticket(self, user_id, provider_name, provider_code, timeout=None):
 
     # Create a transaction because this operation must be atomic
     with db.transaction():
 
       # Update the ping on this service
       db.query("update services set pingtime=(strftime('%s','now')) where githash = $self.service_githash", vars = locals());
+
+      # Return any tickets with lapsed temporary claims to the queue
+      ClaimLogic.release_expired_claims()
 
       # Atomically claim the highest-priority 'ready' ticket for this service. A single
       # UPDATE...WHERE...RETURNING (rather than SELECT then UPDATE) avoids a race between
@@ -1111,19 +1209,8 @@ class ServiceLogic:
       # Now we have a ticket
       ticket_id = res[0].id
 
-      # Make an entry in the claims table, to keep track of this claim
-      db.insert("claim_history", 
-                ticket_id=ticket_id, 
-                provider=provider_name, 
-                provider_code=provider_code,
-                puser_id=user_id)
-
-      # Mark the ticket as claimed
-      TicketLogic(ticket_id).set_status("claimed")
-
-      # Update the log for the user
-      TicketLogic(ticket_id).append_log("info",
-          "Ticket claimed by provider %s instance %s" % (provider_name,provider_code))
+      # Record the claim, mark the ticket as claimed and log it for the user
+      ClaimLogic.record_claim(ticket_id, user_id, provider_name, provider_code, timeout)
 
       # Return the ticket ID
       return ticket_id
@@ -1689,6 +1776,20 @@ class ProviderAPIBase(AbstractAPI):
 
     return (provider_name, provider_code)
 
+  # Get the optional 'timeout' parameter (seconds) for a temporary claim. Returns
+  # None (permanent claim) if the parameter is absent or empty.
+  def get_claim_timeout(self):
+    timeout = web.input().get('timeout')
+    if timeout is None or timeout == '':
+      return None
+    try:
+      timeout = int(timeout)
+    except ValueError:
+      self.raise_badrequest("Parameter 'timeout' must be a positive integer")
+    if timeout <= 0:
+      self.raise_badrequest("Parameter 'timeout' must be a positive integer")
+    return timeout
+
 
 
 
@@ -1742,8 +1843,12 @@ class ProviderServiceClaimsAPI (ProviderAPIBase):
     # Get the provider info
     (provider_name, provider_code) = self.get_provider_info()
 
+    # Optional: claim only temporarily, for this many seconds
+    timeout = self.get_claim_timeout()
+
     # Try to claim the ticket
-    ticket_id = ServiceLogic(service_githash).claim_ticket(sess.user_id, provider_name, provider_code)
+    ticket_id = ServiceLogic(service_githash).claim_ticket(
+      sess.user_id, provider_name, provider_code, timeout)
 
     # If there is no ticket to claim, we return 0, this is more meaningful than
     # a bad request header
@@ -1770,10 +1875,35 @@ class ProviderMultipleServiceClaimsAPI (ProviderAPIBase):
     # Get the provider info
     (provider_name, provider_code) = self.get_provider_info()
 
+    # Optional: claim only temporarily, for this many seconds
+    timeout = self.get_claim_timeout()
+
     # Call the business logic method
-    qresult = ClaimLogic(sess.user_id, provider_name, provider_code).claim_multiservice(svclist)
+    qresult = ClaimLogic(sess.user_id, provider_name, provider_code).claim_multiservice(svclist, timeout)
     if qresult is not None:
       return query_as_reqfmt(qresult, ['id', 'service_githash', 'status'])
+
+
+class ProviderTicketClaimAPI (ProviderAPIBase):
+
+  # Claim this specific ticket, typically when a job queued under a temporary claim
+  # starts working on it. Without a 'timeout' parameter the claim is permanent;
+  # with 'timeout' it expires that many seconds from now. Succeeds if the caller
+  # (same provider and code) holds a live temporary claim on the ticket, or if the
+  # ticket is 'ready'. Fails if the ticket is permanently claimed (even by the
+  # caller), temporarily claimed by another provider instance, or finished.
+  # See ClaimLogic.renew_claim.
+  def POST(self, ticket_id):
+
+    self.check_ticket_access(ticket_id)
+    (provider_name, provider_code) = self.get_provider_info()
+    timeout = self.get_claim_timeout()
+
+    if not ClaimLogic(sess.user_id, provider_name, provider_code).renew_claim(int(ticket_id), timeout):
+      self.raise_badrequest("Ticket %s is not available to provider %s instance %s"
+                            % (ticket_id, provider_name, provider_code))
+
+    return ticket_id
 
 
 class ProviderMultipleServiceAvailableAPI (ProviderAPIBase):
@@ -1796,6 +1926,9 @@ class ProviderMultipleServiceAvailableAPI (ProviderAPIBase):
     # Polling for work counts as the provider being alive, same as claiming
     db.update("services", where="githash in $svclist",
               pingtime=web.SQLLiteral("strftime('%s','now')"), vars=locals())
+
+    # Tickets whose temporary claims lapsed count as available again
+    ClaimLogic.release_expired_claims()
 
     qresult = db.query(
       "select T.service_githash, S.name as service_name, count(*) as ready_tickets "
