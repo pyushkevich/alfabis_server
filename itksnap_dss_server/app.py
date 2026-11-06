@@ -1073,35 +1073,54 @@ class ClaimLogic:
       tl.append_log("info", "Ticket temporarily claimed by provider %s instance %s for %d seconds"
                     % (provider_name, provider_code, timeout))
 
-  # Renew the caller's current claim on a specific ticket: with timeout=None the
-  # claim becomes permanent, otherwise it expires timeout seconds from now. Only
-  # an unexpired claim that is the ticket's most recent one can be renewed.
-  # Returns True on success.
+  # Claim a specific ticket, e.g., when a job queued under a temporary claim starts
+  # working on it. With timeout=None the claim becomes permanent (the ticket is
+  # being worked on); otherwise it expires timeout seconds from now. Succeeds if:
+  #   - the ticket's latest claim is a live temporary claim held by this provider
+  #     instance (same user, provider and provider code): the claim is renewed;
+  #   - or the ticket is 'ready' (e.g., the temporary claim lapsed and nobody else
+  #     took it): the ticket is claimed anew.
+  # Fails if the ticket is permanently claimed (by anyone, including this caller,
+  # so that only one job can start working on a ticket), temporarily claimed by
+  # another provider instance, or in any other state. Returns True on success.
   def renew_claim(self, ticket_id, timeout):
     with db.transaction():
       ClaimLogic.release_expired_claims()
 
       now = int(time.time())
       expires = now + timeout if timeout is not None else None
-      user_id = self.user_id
+      (user_id, provider_name, provider_code) = (self.user_id, self.provider_name, self.provider_code)
+
+      # Renew this instance's live temporary claim
       res = db.query(
         "update claim_history set expires = $expires "
         "where id = (select max(id) from claim_history where ticket_id = $ticket_id) "
-        "  and puser_id = $user_id "
-        "  and (expires is null or expires > $now) "
+        "  and puser_id = $user_id and provider = $provider_name "
+        "  and provider_code = $provider_code "
+        "  and expires is not null and expires > $now "
         "  and exists (select 1 from tickets where id = $ticket_id and status = 'claimed') "
         "returning id", vars=locals())
-      if not res:
-        return False
+      if res:
+        if timeout is None:
+          TicketLogic(ticket_id).append_log("info", "Ticket claimed by provider %s instance %s"
+                                            % (provider_name, provider_code))
+        else:
+          TicketLogic(ticket_id).append_log("info",
+              "Temporary claim by provider %s instance %s extended for %d seconds"
+              % (provider_name, provider_code, timeout))
+        return True
 
-      if timeout is None:
-        TicketLogic(ticket_id).append_log("info", "Ticket claimed by provider %s instance %s"
-                                          % (self.provider_name, self.provider_code))
-      else:
-        TicketLogic(ticket_id).append_log("info",
-            "Temporary claim by provider %s instance %s extended for %d seconds"
-            % (self.provider_name, self.provider_code, timeout))
-      return True
+      # Otherwise, claim the ticket if it is back in the queue. As with the other
+      # claims, a single atomic UPDATE...RETURNING so that only one caller wins.
+      res = db.query(
+        "update tickets set status = 'claimed' "
+        "where id = $ticket_id and status = 'ready' "
+        "returning id", vars=locals())
+      if res:
+        ClaimLogic.record_claim(ticket_id, user_id, provider_name, provider_code, timeout)
+        return True
+
+      return False
 
   def claim_multiservice(self, service_githash_list, timeout=None):
 
@@ -1867,11 +1886,13 @@ class ProviderMultipleServiceClaimsAPI (ProviderAPIBase):
 
 class ProviderTicketClaimAPI (ProviderAPIBase):
 
-  # Renew the caller's current claim on this ticket. Without a 'timeout' parameter
-  # the claim becomes permanent (e.g., once a temporarily claimed ticket has been
-  # picked up by a SLURM job); with 'timeout' it is extended to expire that many
-  # seconds from now. Fails if the caller's claim has already expired or the
-  # ticket is no longer claimed by the caller.
+  # Claim this specific ticket, typically when a job queued under a temporary claim
+  # starts working on it. Without a 'timeout' parameter the claim is permanent;
+  # with 'timeout' it expires that many seconds from now. Succeeds if the caller
+  # (same provider and code) holds a live temporary claim on the ticket, or if the
+  # ticket is 'ready'. Fails if the ticket is permanently claimed (even by the
+  # caller), temporarily claimed by another provider instance, or finished.
+  # See ClaimLogic.renew_claim.
   def POST(self, ticket_id):
 
     self.check_ticket_access(ticket_id)
@@ -1879,7 +1900,8 @@ class ProviderTicketClaimAPI (ProviderAPIBase):
     timeout = self.get_claim_timeout()
 
     if not ClaimLogic(sess.user_id, provider_name, provider_code).renew_claim(int(ticket_id), timeout):
-      self.raise_badrequest("Ticket %s is not currently claimed by user %s" % (ticket_id, sess.user_id))
+      self.raise_badrequest("Ticket %s is not available to provider %s instance %s"
+                            % (ticket_id, provider_name, provider_code))
 
     return ticket_id
 
