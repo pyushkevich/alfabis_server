@@ -36,3 +36,13 @@ def test_menu_shows_server_version(server):
     r = requests.get(server.base_url + "/about")
     assert r.status_code == 200
     assert 'class="menu-version">itksnap-dss-server %s<' % __version__ in r.text
+
+
+def test_stylesheets_versioned(server):
+    # Versioned URLs so browsers fetch new CSS after an upgrade instead of a
+    # cached copy (the old server let browsers cache static files)
+    from itksnap_dss_server import __version__
+    r = requests.get(server.base_url + "/about")
+    assert 'href="static/alfabis.css?v=%s"' % __version__ in r.text
+    r = requests.get(server.base_url + "/static/alfabis.css?v=%s" % __version__)
+    assert r.status_code == 200 and "menu-version" in r.text
