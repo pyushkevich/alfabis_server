@@ -11,8 +11,18 @@
 # Writes one JSON-lines file per table (<table>.jsonl) plus sequences.jsonl.
 # Values are converted to what the SQLite schema expects: timestamps become
 # Unix epoch seconds, booleans 0/1, enums text, char(n) values are trimmed.
-# Session times are kept in web.py's own text format (see import_sqlite.py),
-# and only sessions used within the last year (the session lifetime) are kept.
+# Session times are kept in web.py's own text format (see import_sqlite.py).
+#
+# Sessions: web.py creates one for every request without a cookie, so most
+# are anonymous. Environment variables choose which ones to export:
+#   SESSIONS=loggedin  (default) logged-in sessions only. Finding them decodes
+#                      every row, which takes a while on a big table.
+#            all       every session used within the last year
+#            none      no sessions (export only sessions.jsonl to skip the rest)
+#   SESSIONS_SINCE='2026-11-10 16:00'  only sessions used since then (UTC).
+#                      With an index on sessions(atime) this is quick, e.g. to
+#                      add the sessions active since an earlier full export.
+#   TABLES='sessions'  export only these tables (default: all)
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -37,7 +47,19 @@ Q[ticket_log]="select id, ticket_id, category::text as category, message, $(epoc
 Q[ticket_attachment]="select id, ticket_id, mime_type, description, uuid from ticket_attachment"
 Q[ticket_log_attachment]="select log_id, attachment_id from ticket_log_attachment"
 Q[ticket_history]="select id, ticket_id, status::text as status, $(epoch atime) from ticket_history"
-Q[sessions]="select rtrim(session_id) as session_id, to_char(atime, 'YYYY-MM-DD HH24:MI:SS.US') as atime, data from sessions where atime > now() - interval '1 year'"
+SESS_WHERE="atime > now() - interval '1 year'"
+if [[ -n "${SESSIONS_SINCE:-}" ]]; then
+  SESS_WHERE="atime > '${SESSIONS_SINCE}'::timestamp"
+fi
+case "${SESSIONS:-loggedin}" in
+  # web.py (Python 2) pickles the session dict with protocol 0, where a true
+  # 'loggedin' value reads: S'loggedin' NL p<memo> NL I01
+  loggedin) SESS_WHERE="$SESS_WHERE and convert_from(decode(data, 'base64'), 'LATIN1') ~ 'S''loggedin''\np[0-9]+\nI01'" ;;
+  all) ;;
+  none) SESS_WHERE="false" ;;
+  *) echo "SESSIONS must be loggedin, all or none" >&2; exit 2 ;;
+esac
+Q[sessions]="select rtrim(session_id) as session_id, to_char(atime, 'YYYY-MM-DD HH24:MI:SS.US') as atime, data from sessions where $SESS_WHERE"
 Q[sequences]="select 'users' as name, last_value from users_id_seq
   union all select 'tickets', last_value from tickets_id_seq
   union all select 'claim_history', last_value from claim_history_id_seq
@@ -45,7 +67,7 @@ Q[sequences]="select 'users' as name, last_value from users_id_seq
   union all select 'ticket_attachment', last_value from ticket_attachment_id_seq
   union all select 'ticket_history', last_value from ticket_history_id_seq"
 
-for t in "${!Q[@]}"; do
+for t in ${TABLES:-${!Q[@]}}; do
   # row_to_json escapes newlines, so each row is exactly one line
   psql "$@" -X -q -A -t -v ON_ERROR_STOP=1 \
     -c "set timezone to 'UTC'; select row_to_json(t) from (${Q[$t]}) t" > "$OUT/$t.jsonl"

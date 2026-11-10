@@ -73,7 +73,16 @@ def main(argv):
 
     bad_sessions = 0
     for table in TABLES:
-        rows = list(read_jsonl(os.path.join(export_dir, table + '.jsonl')))
+        if table == 'sessions':
+            # sessions.jsonl, plus e.g. sessions_recent.jsonl from a later
+            # SESSIONS_SINCE export; later files replace earlier rows
+            rows = []
+            for fn in sorted(f for f in os.listdir(export_dir)
+                             if f.startswith('sessions') and f.endswith('.jsonl')):
+                rows += read_jsonl(os.path.join(export_dir, fn))
+            rows = list({r['session_id']: r for r in rows}.values())
+        else:
+            rows = list(read_jsonl(os.path.join(export_dir, table + '.jsonl')))
         if table == 'sessions':
             kept = []
             for r in rows:
