@@ -22,6 +22,7 @@ Notes:
     old data are reported at the end (the old tickets table had no foreign key
     on service_githash, for example).
 """
+import argparse
 import base64
 import importlib.resources
 import json
@@ -29,6 +30,7 @@ import os
 import pickle
 import sqlite3
 import sys
+import time
 
 # Insert order: parents before children
 TABLES = ['user_tiers', 'users', 'providers', 'provider_access', 'services',
@@ -54,11 +56,38 @@ def convert_session(data: str) -> str:
     return base64.encodebytes(pickle.dumps(value)).decode()
 
 
+def retire_old_tickets(con, days):
+    """Mark finished tickets with no activity in the last `days` days as
+    deleted, as the server does when a user deletes a ticket, so that tickets
+    whose files are not carried over do not show up with missing results."""
+    cutoff = int(time.time()) - days * 86400
+    ids = [r[0] for r in con.execute(
+        "select id from tickets T where status in ('success', 'failed', 'timeout') "
+        "and coalesce((select max(atime) from ticket_history where ticket_id = T.id), 0) < ? "
+        "and coalesce((select max(atime) from ticket_log where ticket_id = T.id), 0) < ?",
+        (cutoff, cutoff))]
+    for tid in ids:
+        con.execute("update tickets set status = 'deleted' where id = ?", (tid,))
+        con.execute("insert into ticket_history (ticket_id, status) values (?, 'deleted')", (tid,))
+        con.execute("insert into ticket_log (ticket_id, category, message) values (?, 'info', ?)",
+                    (tid, 'Ticket removed when DSS moved to a new server: no activity for '
+                          'more than %d days' % days))
+    con.commit()
+    return ids
+
+
 def main(argv):
-    if len(argv) != 2:
-        print(__doc__)
-        return 2
-    export_dir, db_path = argv
+    p = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    p.add_argument('export_dir')
+    p.add_argument('db_path')
+    p.add_argument('--retire-days', type=int, metavar='N',
+                   help='mark finished tickets with no activity in the last N days '
+                        'as deleted (their files need not be copied)')
+    p.add_argument('--keep-list', metavar='FILE',
+                   help='write the ids (%%08d, as datastore directory names) of the '
+                        'tickets that are not deleted, i.e. whose files to copy')
+    a = p.parse_args(argv)
+    export_dir, db_path = a.export_dir, a.db_path
     if os.path.exists(db_path):
         print('%s already exists; refusing to overwrite it' % db_path)
         return 1
@@ -121,6 +150,16 @@ def main(argv):
                   % (table, parent, len(rowids), rowids[:5]))
     if bad_sessions:
         print('\n%d sessions could not be converted and were dropped' % bad_sessions)
+    if a.retire_days is not None:
+        retired = retire_old_tickets(con, a.retire_days)
+        print('\nRetired %d finished tickets with no activity in the last %d days'
+              % (len(retired), a.retire_days))
+    if a.keep_list:
+        keep = [r[0] for r in con.execute(
+            "select id from tickets where status != 'deleted' order by id")]
+        with open(a.keep_list, 'w') as f:
+            f.writelines('%08d\n' % t for t in keep)
+        print('%d tickets are not deleted; their ids are in %s' % (len(keep), a.keep_list))
     print('\nIntegrity check:', con.execute('pragma integrity_check').fetchone()[0])
     con.close()
     return 0
