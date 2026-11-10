@@ -139,6 +139,7 @@ app = web.application(urls, globals())
 # sql/init_db_sqlite.sql if the database is missing/empty all live in
 # itksnap_dss_server.db -- see that module for details.
 from itksnap_dss_server import db as _db
+from itksnap_dss_server import __version__
 sqlite_path = pargs.sqlite_path
 db = _db.connect(sqlite_path)
 
@@ -154,7 +155,7 @@ if not pargs.noauth:
 
   # Blank session
   sess = web.session.Session(
-    app, web.session.DBStore(db, 'sessions'),
+    app, _db.SessionStore(db, 'sessions'),
     initializer={'loggedin': False, 'acceptterms': False, 'is_admin': False})
 
 else:
@@ -170,7 +171,7 @@ else:
 
   # Prepopulated session
   sess = web.session.Session(
-    app, web.session.DBStore(db, 'sessions'), 
+    app, _db.SessionStore(db, 'sessions'), 
     initializer={'loggedin': True, 'acceptterms': True, 'is_admin': True,
                  'email' : 'test@example.com', 'user_id' : user_id})
 
@@ -185,7 +186,8 @@ else:
 _templates_dir = str(importlib.resources.files('itksnap_dss_server') / 'templates')
 render = web.template.render(
   _templates_dir,
-  globals={'markdown': markdown.markdown, 'session': sess},
+  globals={'markdown': markdown.markdown, 'session': sess,
+           'version': __version__},
   cache=False);
 
 # Configure the markdown to HTML converter (do we need this really? Why not HTML5?)
@@ -387,8 +389,9 @@ class ServicesPage:
       j = json.loads(x.json)
       s['name'] = x.name
       s['shortdesc'] = x.shortdesc;
-      s['longdesc'] = j['longdesc'];
-      s['url'] = j['url'];
+      # Older services' service.json may lack these optional fields
+      s['longdesc'] = j.get('longdesc', '')
+      s['url'] = j.get('url')
       alive_sec = x.since;
       s['alive_btn'] = 'green' if alive_sec < 600 else ('yellow' if alive_sec < 3600 else 'red')
       s['alive_min'] = round(alive_sec / 60,2)

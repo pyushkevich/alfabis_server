@@ -27,8 +27,10 @@ drop table if exists sessions;
 create table sessions (
   session_id text not null unique,
   atime integer not null default (strftime('%s','now')),
-  data text
+  data text,
+  loggedin integer default null
 );
+create index sessions_atime_idx on sessions (atime);
 
 drop table if exists user_tiers;
 create table user_tiers
