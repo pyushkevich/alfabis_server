@@ -154,7 +154,7 @@ if not pargs.noauth:
 
   # Blank session
   sess = web.session.Session(
-    app, web.session.DBStore(db, 'sessions'),
+    app, _db.SessionStore(db, 'sessions'),
     initializer={'loggedin': False, 'acceptterms': False, 'is_admin': False})
 
 else:
@@ -170,7 +170,7 @@ else:
 
   # Prepopulated session
   sess = web.session.Session(
-    app, web.session.DBStore(db, 'sessions'), 
+    app, _db.SessionStore(db, 'sessions'), 
     initializer={'loggedin': True, 'acceptterms': True, 'is_admin': True,
                  'email' : 'test@example.com', 'user_id' : user_id})
 

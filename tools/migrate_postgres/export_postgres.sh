@@ -1,6 +1,6 @@
 #!/bin/bash
 # Export the data of a legacy (Python 2 / PostgreSQL) DSS server for import
-# into itksnap-dss-server >= 0.3.0 (SQLite) with import_sqlite.py.
+# into itksnap-dss-server >= 0.3.1 (SQLite) with import_sqlite.py.
 #
 # Run on the old server, ideally with the app stopped so the export is
 # consistent:
@@ -11,7 +11,7 @@
 # Writes one JSON-lines file per table (<table>.jsonl) plus sequences.jsonl.
 # Values are converted to what the SQLite schema expects: timestamps become
 # Unix epoch seconds, booleans 0/1, enums text, char(n) values are trimmed.
-# Session times are kept in web.py's own text format (see import_sqlite.py).
+# Session times are exported as UTC text; import_sqlite.py converts them.
 #
 # Sessions: web.py creates one for every request without a cookie, so most
 # are anonymous. Environment variables choose which ones to export:

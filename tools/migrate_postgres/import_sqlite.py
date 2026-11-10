@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Import the data exported by export_postgres.sh into a new SQLite database
-for itksnap-dss-server >= 0.3.0.
+for itksnap-dss-server >= 0.3.1.
 
     python import_sqlite.py <export_dir> <new.sqlite3>
 
@@ -12,10 +12,8 @@ directory layout is unchanged).
 Notes:
   - Sessions: the old server stored them as Python 2 pickles. Each one is
     re-pickled for Python 3, so logged-in users (ITK-SNAP, itksnap-wt and
-    provider daemons) stay logged in. Their atime is stored as text in the
-    format web.py's DBStore itself writes: web.py compares atime with a
-    datetime when purging expired sessions, and in SQLite an integer atime
-    would always compare as older, so integer times would be purged.
+    provider daemons) stay logged in. atime becomes epoch seconds and the
+    loggedin column is set, as itksnap-dss-server >= 0.3.1 expects.
   - Ids are kept, and each table's autoincrement counter is set to the old
     Postgres sequence value, so ids of deleted rows are never reused.
   - Foreign keys are not enforced during the import; violations found in the
@@ -24,6 +22,8 @@ Notes:
 """
 import argparse
 import base64
+import calendar
+import datetime
 import importlib.resources
 import json
 import os
@@ -46,14 +46,19 @@ def read_jsonl(path):
                 yield json.loads(line)
 
 
-def convert_session(data: str) -> str:
-    """Python 2 pickle (base64) -> Python 3 pickle (base64), as web.py encodes it."""
-    raw = base64.decodebytes(data.encode())
+def convert_session(row):
+    """Convert an exported session row in place: the Python 2 pickle (base64)
+    becomes a Python 3 pickle (base64), as web.py encodes it; atime (UTC text)
+    becomes epoch seconds; loggedin is set from the session data."""
+    raw = base64.decodebytes(row['data'].encode())
     try:
         value = pickle.loads(raw, encoding='utf-8')
     except UnicodeDecodeError:
         value = pickle.loads(raw, encoding='latin1')
-    return base64.encodebytes(pickle.dumps(value)).decode()
+    row['data'] = base64.encodebytes(pickle.dumps(value)).decode()
+    row['atime'] = calendar.timegm(datetime.datetime.strptime(
+        row['atime'].split('.')[0], '%Y-%m-%d %H:%M:%S').timetuple())
+    row['loggedin'] = 1 if value.get('loggedin') else 0
 
 
 def retire_old_tickets(con, days):
@@ -116,7 +121,7 @@ def main(argv):
             kept = []
             for r in rows:
                 try:
-                    r['data'] = convert_session(r['data'])
+                    convert_session(r)
                     kept.append(r)
                 except Exception as e:   # unreadable session: drop it, user logs in again
                     bad_sessions += 1

@@ -8,8 +8,10 @@ import importlib.resources
 import os
 import sqlite3
 import sys
+import time
 
 import web
+import web.session
 
 
 def _schema_sql():
@@ -100,3 +102,70 @@ def _ensure_schema(db, sqlite_path):
     conn = db.ctx.db
     conn.executescript(_schema_sql())
     conn.commit()
+
+
+class SessionStore(web.session.DBStore):
+    """web.py's DBStore, adapted to this app's sessions table.
+
+    - atime is stored as integer Unix epoch seconds, like every other time in
+      the schema. web.py's DBStore writes a datetime (stored by SQLite as
+      text) and purges with `$cutoff > atime`; in SQLite every integer sorts
+      below every text value, so it would purge rows with integer times and
+      never purge rows with text times.
+    - web.py creates and saves a session for every request without a cookie
+      (bots, health checks, first visits), so the table fills up with
+      anonymous sessions. Each row records whether the session is logged in,
+      and anonymous sessions are purged after `anonymous_timeout` seconds,
+      checked at most once per `purge_interval` seconds.
+    """
+
+    anonymous_timeout = 86400
+    purge_interval = 3600
+
+    def __init__(self, db, table_name):
+        super().__init__(db, table_name)
+        self._last_purge = 0
+
+    def __getitem__(self, key):
+        rows = list(self.db.select(self.table, where="session_id=$key", vars=locals()))
+        if not rows:
+            raise KeyError(key)
+        self.db.update(self.table, where="session_id=$key", atime=int(time.time()),
+                       vars=locals())
+        return self.decode(rows[0].data)
+
+    def __setitem__(self, key, value):
+        # encode() returns bytes; the column holds the base64 text
+        pickled = self.encode(value).decode()
+        now = int(time.time())
+        loggedin = 1 if value.get("loggedin") else 0
+        if key in self:
+            self.db.update(self.table, where="session_id=$key", data=pickled,
+                           atime=now, loggedin=loggedin, vars=locals())
+        else:
+            self.db.insert(self.table, False, session_id=key, atime=now,
+                           data=pickled, loggedin=loggedin)
+            self._purge_anonymous(now)
+
+    def _purge_anonymous(self, now):
+        if now - self._last_purge >= self.purge_interval:
+            self._last_purge = now
+            cutoff = now - self.anonymous_timeout
+            self.db.delete(self.table, where="loggedin = 0 and atime < $cutoff",
+                           vars=locals())
+
+    def cleanup(self, timeout):
+        """Called by web.py once per process: purge sessions unused for
+        `timeout` seconds, and fill in the loggedin flag of rows written
+        before it existed (see sql/deltas/02_session_epoch_and_loggedin.sql)."""
+        for r in list(self.db.select(self.table, what="session_id, data",
+                                     where="loggedin is null")):
+            try:
+                loggedin = 1 if self.decode(r.data).get("loggedin") else 0
+            except Exception:
+                loggedin = 0
+            self.db.update(self.table, where="session_id=$sid", loggedin=loggedin,
+                           vars={"sid": r.session_id})
+        cutoff = int(time.time()) - int(timeout)
+        self.db.delete(self.table, where="atime < $cutoff", vars=locals())
+        self._purge_anonymous(int(time.time()))

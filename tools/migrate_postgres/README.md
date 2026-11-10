@@ -1,7 +1,7 @@
 # Migrating a legacy DSS server (PostgreSQL) to itksnap-dss-server
 
 The original DSS server (Python 2, PostgreSQL, run from a git checkout under
-uWSGI) and itksnap-dss-server >= 0.3.0 (Python 3, SQLite) have the same
+uWSGI) and itksnap-dss-server >= 0.3.1 (Python 3, SQLite) have the same
 tables and the same datastore layout. Migrating means:
 
 1. exporting the database with `export_postgres.sh` (on the old server);
