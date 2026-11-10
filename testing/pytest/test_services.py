@@ -62,3 +62,20 @@ def test_registering_service_with_bad_repo_fails(server, admin):
         data={"repo": "/nonexistent/path/to/repo", "ref": "main"},
     )
     assert r.status_code == 400
+
+
+def test_services_page_with_minimal_service_json(server, admin):
+    # Older services' service.json can lack the optional longdesc and url
+    # fields; the /services page must still render.
+    import json, uuid
+    githash = uuid.uuid4().hex + "00000000"
+    conn = server.db()
+    conn.execute(
+        "insert into services (name, githash, version, shortdesc, json) values (?,?,?,?,?)",
+        ("Minimal-" + githash[:6], githash, "1.0.0", "Minimal service",
+         json.dumps({"name": "Minimal", "version": "1.0.0", "shortdesc": "Minimal service"})))
+    conn.commit()
+    conn.close()
+    r = admin.get(server.base_url + "/services")
+    assert r.status_code == 200, r.text
+    assert "Minimal-" + githash[:6] in r.text

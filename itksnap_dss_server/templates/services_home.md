@@ -26,7 +26,8 @@ $for svc in services:
            <td><span style="white-space: nowrap">$svc['name']</span></td>
            <td>
                <b>$svc['shortdesc']</b>&nbsp
-               <a href="$svc['url']"><img src="/static/img/icons8-external_link.png" width="16" height="16" title="External link"></a>
+               $if svc['url']:
+                   <a href="$svc['url']"><img src="/static/img/icons8-external_link.png" width="16" height="16" title="External link"></a>
                <p style="font-size:small; line-height: 120%;">$svc['longdesc']</p>
            </td>
            <td style="white-space: nowrap">

@@ -389,8 +389,9 @@ class ServicesPage:
       j = json.loads(x.json)
       s['name'] = x.name
       s['shortdesc'] = x.shortdesc;
-      s['longdesc'] = j['longdesc'];
-      s['url'] = j['url'];
+      # Older services' service.json may lack these optional fields
+      s['longdesc'] = j.get('longdesc', '')
+      s['url'] = j.get('url')
       alive_sec = x.since;
       s['alive_btn'] = 'green' if alive_sec < 600 else ('yellow' if alive_sec < 3600 else 'red')
       s['alive_min'] = round(alive_sec / 60,2)
