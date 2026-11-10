@@ -29,3 +29,10 @@ def test_static_unknown_file_404s(server):
 def test_static_path_traversal_blocked(server):
     r = requests.get(server.base_url + "/static/../../pyproject.toml")
     assert r.status_code in (400, 404)
+
+
+def test_menu_shows_server_version(server):
+    from itksnap_dss_server import __version__
+    r = requests.get(server.base_url + "/about")
+    assert r.status_code == 200
+    assert 'class="menu-version">itksnap-dss-server %s<' % __version__ in r.text

@@ -139,6 +139,7 @@ app = web.application(urls, globals())
 # sql/init_db_sqlite.sql if the database is missing/empty all live in
 # itksnap_dss_server.db -- see that module for details.
 from itksnap_dss_server import db as _db
+from itksnap_dss_server import __version__
 sqlite_path = pargs.sqlite_path
 db = _db.connect(sqlite_path)
 
@@ -185,7 +186,8 @@ else:
 _templates_dir = str(importlib.resources.files('itksnap_dss_server') / 'templates')
 render = web.template.render(
   _templates_dir,
-  globals={'markdown': markdown.markdown, 'session': sess},
+  globals={'markdown': markdown.markdown, 'session': sess,
+           'version': __version__},
   cache=False);
 
 # Configure the markdown to HTML converter (do we need this really? Why not HTML5?)
