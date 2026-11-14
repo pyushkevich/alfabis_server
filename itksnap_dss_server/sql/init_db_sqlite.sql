@@ -97,7 +97,10 @@ create table tickets
   id integer primary key autoincrement,
   user_id integer not null references users(id),
   service_githash text not null references services(githash),
-  status text check (status in ('init','ready','claimed','success','failed','timeout','deleted'))
+  status text check (status in ('init','ready','claimed','success','failed','timeout','deleted')),
+  /* Job parameters as a JSON object, validated against the 'parameters' list in the
+     service's service.json. Defaults are filled in when the ticket becomes 'ready'. */
+  params text default null
 );
 
 drop table if exists claim_history;
