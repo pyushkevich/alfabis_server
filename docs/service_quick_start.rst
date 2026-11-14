@@ -308,6 +308,8 @@ We can now send a message to the user letting them know that we have downloaded 
 
 If you look at the "Results" tab in ITK-SNAP, this message should be visible.
 
+.. note:: If your service declares ``parameters`` in its ``service.json`` (see :ref:`refman_service_json`), your script can read the values that the user chose, with defaults filled in, as a JSON object by sending a ``GET`` request to ``/api/pro/tickets/$TICKET_ID/params``.
+
 Next, we will extract the layers identified by the different tags (target, source, source segmentation) from the workspace. We can list all of the layers with tags like this::
 
     >> INPUT_WSP=/tmp/dss_work/ticket_1/ticket_00000001.itksnap

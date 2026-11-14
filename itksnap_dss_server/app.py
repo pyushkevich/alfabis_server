@@ -3,6 +3,8 @@ import web,sys
 import markdown
 import json
 import os
+import re
+import math
 import importlib.resources
 import pathlib
 import shutil
@@ -104,6 +106,7 @@ urls = (
   r"/api/tickets/(\d+)/detail", "TicketDetailAPI",
   r"/api/tickets/(\d+)/delete", "TicketDeleteAPI",
   r"/api/tickets/(\d+)/retry", "TicketRetryAPI",
+  r"/api/tickets/(\d+)/params", "TicketParamsAPI",
   r"/api/tickets/logs/(\d+)/attachments", "TicketLogAttachmentAPI",
   r"/api/pro/services", "ProviderServicesAPI",
   r"/api/pro/services/([a-f0-9]+)/claims", "ProviderServiceClaimsAPI",
@@ -116,6 +119,7 @@ urls = (
   r"/api/pro/tickets/(\d+)/(error|warning|info|log)", "ProviderTicketLogAPI",
   r"/api/pro/tickets/(\d+)/attachments", "ProviderTicketAttachmentAPI",
   r"/api/pro/tickets/(\d+)/progress", "ProviderTicketProgressAPI",
+  r"/api/pro/tickets/(\d+)/params", "ProviderTicketParamsAPI",
   r"/api/admin/providers","AdminProvidersAPI",
   r"/api/admin/providers/([\w\-]+)/delete","AdminProviderDeleteAPI", 
   r"/api/admin/providers/([\w\-]+)/users","AdminProviderUsersAPI", 
@@ -871,6 +875,23 @@ class TicketLogic:
     # Return a tuple of dbindex, hash, and filename
     return (res, ahash, afile)
 
+  # Get the job parameters stored for this ticket (a dict, empty if none are set)
+  def get_params(self):
+    res = db.select('tickets', what='params', where='id=$self.ticket_id', vars=locals())
+    params = res[0].params if res else None
+    return json.loads(params) if params else {}
+
+  # Store the job parameters for this ticket (a dict)
+  def set_params(self, params):
+    params_json = json.dumps(params)
+    db.update('tickets', where='id=$self.ticket_id', params=params_json, vars=locals())
+
+  # Get the ParameterSpec of this ticket's service
+  def get_param_spec(self):
+    githash = db.select('tickets', what='service_githash', where='id=$self.ticket_id',
+                        vars=locals())[0].service_githash
+    return ParameterSpec.for_service(githash)
+
   # Get ticket detail in a JSON-dumpable structure
   def get_detail(self):
 
@@ -879,6 +900,9 @@ class TicketLogic:
 
     # Get the status of this ticket
     qr['status'] = db.select('tickets', where='id=$self.ticket_id', vars=locals())[0].status;
+
+    # Job parameters
+    qr['params'] = self.get_params()
 
     # Depending on status, assign progress
     if qr['status'] == 'claimed':
@@ -1217,6 +1241,130 @@ class ServiceLogic:
 
       # Return the ticket ID
       return ticket_id
+
+
+# Job parameters declared by a service in the 'parameters' list of its service.json.
+# Each entry has a 'name' and a 'type' (string, integer, number, boolean, choice) and
+# optionally 'displayname', 'hint', 'default', 'required', 'min'/'max' (integer and
+# number) and 'choices' (choice: a list of {name, displayname}). The constructor
+# checks the declaration and raises ValueError with a readable message if it is bad.
+class ParameterSpec:
+
+  TYPES = ('string', 'integer', 'number', 'boolean', 'choice')
+  TYPE_ALIASES = {'choose_one': 'choice'}
+  NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+  def __init__(self, param_list):
+    if param_list is None:
+      param_list = []
+    if not isinstance(param_list, list):
+      raise ValueError("'parameters' must be a list")
+
+    # Parameters by name, in declaration order
+    self.params = {}
+    for p in param_list:
+      if not isinstance(p, dict):
+        raise ValueError("each parameter must be an object")
+      name = p.get('name')
+      if not isinstance(name, str) or not self.NAME_RE.match(name):
+        raise ValueError("invalid parameter name %r" % (name,))
+      if name in self.params:
+        raise ValueError("duplicate parameter name '%s'" % name)
+
+      ptype = self.TYPE_ALIASES.get(p.get('type'), p.get('type'))
+      if ptype not in self.TYPES:
+        raise ValueError("parameter '%s' has unknown type %r" % (name, p.get('type')))
+      p = dict(p, type=ptype)
+
+      if ptype == 'choice':
+        choices = p.get('choices')
+        if not isinstance(choices, list) or not choices:
+          raise ValueError("parameter '%s' must have a non-empty list of choices" % name)
+        cnames = [c.get('name') if isinstance(c, dict) else None for c in choices]
+        if not all(isinstance(c, str) and c for c in cnames) or len(set(cnames)) != len(cnames):
+          raise ValueError("choices of parameter '%s' must have unique, non-empty names" % name)
+        p['choice_names'] = cnames
+
+      for bound in ('min', 'max'):
+        if bound in p:
+          if ptype not in ('integer', 'number'):
+            raise ValueError("parameter '%s': '%s' only applies to integer and number" % (name, bound))
+          if not self._is_number(p[bound]):
+            raise ValueError("parameter '%s': '%s' must be a number" % (name, bound))
+      if 'min' in p and 'max' in p and p['min'] > p['max']:
+        raise ValueError("parameter '%s': min is greater than max" % name)
+
+      if 'required' in p and not isinstance(p['required'], bool):
+        raise ValueError("parameter '%s': 'required' must be true or false" % name)
+
+      if 'default' in p:
+        p['default'] = self._coerce(p, p['default'], "default of parameter '%s'" % name)
+
+      self.params[name] = p
+
+  @staticmethod
+  def for_service(githash):
+    res = list(db.select("services", what="json", where="githash=$githash", vars=locals()))
+    if not res:
+      raise ValueError("service %s not found" % githash)
+    return ParameterSpec(json.loads(res[0].json).get('parameters'))
+
+  @staticmethod
+  def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+  # Convert a value supplied by a client (JSON value, or a string from a form post) to
+  # the parameter's type. Raises ValueError if it does not fit.
+  def _coerce(self, p, v, what=None):
+    what = what or "parameter '%s'" % p['name']
+    t = p['type']
+    mismatch = ValueError("%s must be of type %s, got %r" % (what, t, v))
+    if t == 'string' or t == 'choice':
+      if not isinstance(v, str):
+        raise mismatch
+      if t == 'choice' and v not in p['choice_names']:
+        raise ValueError("%s must be one of: %s" % (what, ", ".join(p['choice_names'])))
+    elif t == 'boolean':
+      if isinstance(v, str) and v.lower() in ('true', '1', 'yes', 'on'):
+        v = True
+      elif isinstance(v, str) and v.lower() in ('false', '0', 'no', 'off'):
+        v = False
+      elif not isinstance(v, bool):
+        raise mismatch
+    else:
+      if isinstance(v, str):
+        try:
+          v = int(v) if t == 'integer' else float(v)
+        except ValueError:
+          raise mismatch
+      if not self._is_number(v) or (t == 'integer' and isinstance(v, float) and not v.is_integer()):
+        raise mismatch
+      if t == 'integer':
+        v = int(v)
+      if 'min' in p and v < p['min']:
+        raise ValueError("%s must be at least %s" % (what, p['min']))
+      if 'max' in p and v > p['max']:
+        raise ValueError("%s must be at most %s" % (what, p['max']))
+    return v
+
+  # Check the given values (a dict) and return a clean dict. With partial=True, only
+  # the values supplied are checked (used when a consumer sets some of the values).
+  # Otherwise, defaults are filled in and missing required values are an error.
+  def validate(self, values, partial=False):
+    for name in values:
+      if name not in self.params:
+        raise ValueError("unknown parameter '%s'" % name)
+    out = {}
+    for name, p in self.params.items():
+      if name in values:
+        out[name] = self._coerce(p, values[name])
+      elif partial:
+        continue
+      elif 'default' in p:
+        out[name] = p['default']
+      elif p.get('required', True):
+        raise ValueError("required parameter '%s' has not been set" % name)
+    return out
 
 
 # =====================
@@ -1621,8 +1769,16 @@ class TicketStatusAPI (TicketsAPIBase):
 
     # Check if the current status is appropriate for the new status
     if new_status == "ready":
+
+      # Complete the job parameters: fill in defaults, require the required ones
+      tl = TicketLogic(ticket_id)
+      try:
+        params = tl.get_param_spec().validate(tl.get_params())
+      except ValueError as e:
+        self.raise_badrequest("Invalid job parameters: %s" % e)
+
       with db.transaction():
-        tl = TicketLogic(ticket_id)
+        tl.set_params(params)
         rtn_status = tl.set_status(new_status)
         tl.append_log("info", "Ticket received and queued for processing")
         return rtn_status
@@ -1720,6 +1876,62 @@ class TicketRetryAPI(TicketsAPIBase):
 
 
 # Base API for ticket provider classes    
+# Get and set the job parameters of a ticket. Parameters can be set while the ticket
+# is in 'init' state, in any number of calls. Each call merges the values sent into the
+# values already stored, and a JSON null removes a value. Values are sent as a JSON
+# object (Content-Type: application/json) or as form fields.
+class TicketParamsAPI(TicketsAPIBase):
+
+  def GET(self, ticket_id):
+
+    # Make sure we have access to this ticket
+    self.check_ticket_access(ticket_id)
+
+    web.header('Content-Type','application/json')
+    return json.dumps(TicketLogic(ticket_id).get_params())
+
+  def POST(self, ticket_id):
+
+    # Make sure we have the ticket and that it has not been submitted
+    # (check_ticket_access skips the status check for admins, so check it here too)
+    self.check_ticket_access(ticket_id, ["init"])
+    if db.select("tickets", where="id=$ticket_id", vars=locals())[0].status != "init":
+      self.raise_badrequest("Parameters can only be set before the ticket is submitted")
+    tl = TicketLogic(ticket_id)
+
+    # Read the values
+    if web.ctx.env.get('CONTENT_TYPE', '').startswith('application/json'):
+      try:
+        values = json.loads(web.data())
+      except ValueError:
+        self.raise_badrequest("Request body is not valid JSON")
+      if not isinstance(values, dict):
+        self.raise_badrequest("Request body must be a JSON object")
+    else:
+      values = dict(web.input())
+
+    # Check the values that were sent and merge them into the stored values
+    try:
+      spec = tl.get_param_spec()
+      for k in values:
+        if k not in spec.params:
+          raise ValueError("unknown parameter '%s'" % k)
+      checked = spec.validate({k: v for k, v in values.items() if v is not None}, partial=True)
+    except ValueError as e:
+      self.raise_badrequest("Invalid job parameters: %s" % e)
+
+    with db.transaction():
+      params = tl.get_params()
+      params.update(checked)
+      for k, v in values.items():
+        if v is None:
+          params.pop(k, None)
+      tl.set_params(params)
+
+    web.header('Content-Type','application/json')
+    return json.dumps(params)
+
+
 class ProviderAPIBase(AbstractAPI):
 
   # Make sure that the user has access to the named service
@@ -1971,6 +2183,19 @@ class ProviderTicketStatusAPI (ProviderAPIBase):
     # Set the status of the ticket in the database
     return TicketLogic(ticket_id).set_status(new_status)
 
+
+
+# Get the job parameters of a claimed ticket, as a JSON object. Defaults have been
+# filled in when the ticket was submitted.
+class ProviderTicketParamsAPI (ProviderAPIBase):
+
+  def GET(self, ticket_id):
+
+    # We must have claimed this ticket
+    self.check_ticket_claimed(ticket_id)
+
+    web.header('Content-Type','application/json')
+    return json.dumps(TicketLogic(ticket_id).get_params())
 
 
 class ProviderTicketFilesAPI (ProviderAPIBase):
@@ -2280,6 +2505,12 @@ class AdminProviderServicesAPI(AdminAbstractAPI):
     except:
       print(traceback.format_exc())
       self.raise_badrequest("Error parsing service.json file")
+
+    # Check the declaration of job parameters, if any
+    try:
+      ParameterSpec(j.get('parameters'))
+    except ValueError as e:
+      self.raise_badrequest("Invalid parameters in service.json: %s" % e)
 
     # Check if the service clashes with an existing service. In that case
     # we reject this update

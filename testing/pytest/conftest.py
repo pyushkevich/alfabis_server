@@ -181,7 +181,9 @@ def provider_setup(server, admin):
     return provider_sess, provider_name, githash, service_name
 
 
-def _make_git_service_repo(server, service_name):
+def _make_git_service_repo(server, service_name, extra=None):
+    """Creates a local git repo holding a service.json. `extra` is a dict of
+    additional service.json fields (e.g. "parameters")."""
     import json
     import subprocess as sp
 
@@ -196,6 +198,7 @@ def _make_git_service_repo(server, service_name):
                 "shortdesc": "Test service",
                 "longdesc": "A fixture service for tests",
                 "url": "https://example.org/test-svc",
+                **(extra or {}),
             },
             f,
         )

@@ -42,7 +42,7 @@ Top-Level Fields
   A list of tags that point to various "objects" in the ITK-SNAP workspace that is passed to your service. See below.
 
 **parameters**
-  ``optional,notused`` A list of parameters that the user must provide for running your service. This has not yet been implemented.
+  ``optional`` A list of parameters (options) that the user can set when running your service. See below.
 
 Tags Directive
 --------------
@@ -92,6 +92,66 @@ The tags directive includes a list of tags, each representing a separate object 
 
 **required**
   A boolean indicating whether the tag must be assigned before the service can be executed
+
+Parameters Directive
+--------------------
+
+The parameters directive lists the options that the user can set for a ticket, such as which atlas to use or whether to perform an optional step. Clients such as ITK-SNAP show each parameter as a field in a form. The values the user chooses are stored with the ticket, and your service reads them after claiming the ticket. An example parameters section looks like this
+
+.. code-block:: json
+
+    {
+      "parameters": [
+        {
+          "name": "corr_mode",
+          "displayname": "Correction Mode",
+          "hint": "Error correction to apply after segmentation.",
+          "type": "choice",
+          "default": "shape",
+          "choices": [
+            { "name": "none", "displayname": "No error correction" },
+            { "name": "shape", "displayname": "Shape correction" },
+            { "name": "intensity", "displayname": "Intensity correction" }
+          ]
+        },
+        { "name": "flip", "displayname": "Flip left and right", "type": "boolean", "default": false },
+        { "name": "atlas_url", "displayname": "Custom atlas URL", "type": "string", "required": false },
+        { "name": "iterations", "displayname": "Iterations", "type": "integer", "default": 100, "min": 1, "max": 1000 }
+      ]
+    }
+
+**name**
+  The unique name of the parameter. It must start with a letter or an underscore and may contain only letters, digits and underscores.
+
+**type**
+  One of ``string``, ``integer``, ``number`` (any real number), ``boolean`` or ``choice`` (one of a list of options). The older name ``choose_one`` is accepted as a synonym of ``choice``.
+
+**displayname**
+  ``optional`` The label shown to the user.
+
+**hint**
+  ``optional`` A longer explanation shown to the user.
+
+**default**
+  ``optional`` The value used if the user does not set the parameter. It must be a valid value for the parameter.
+
+**required**
+  ``optional`` Whether the user must set the parameter before submitting the ticket. A parameter that has no ``default`` is required unless ``required`` is ``false``. A parameter that is not required and has no default is left out of the values passed to your service if the user does not set it.
+
+**min**, **max**
+  ``optional`` Smallest and largest allowed value of an ``integer`` or ``number`` parameter.
+
+**choices**
+  The options of a ``choice`` parameter, each with a ``name`` (the value passed to your service) and an optional ``displayname`` (shown to the user).
+
+The server checks the parameters directive when the service is registered and rejects a ``service.json`` that has an invalid one.
+
+Setting and reading parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The client sets the values while the ticket is in the ``init`` state, by sending a ``POST`` request to ``/api/tickets/<ticket_id>/params``, either as a JSON object (``Content-Type: application/json``), or as form fields. The request can be sent any number of times. Each request adds to or replaces the values sent before it, and a JSON ``null`` removes a value. Each value is checked against its declaration, and a request with an unknown parameter or an invalid value is rejected (HTTP 400) and changes nothing. When the ticket is submitted (its status set to ``ready``), the server fills in the defaults of the parameters that have not been set, and rejects the request if a required parameter has not been set. After that, the values can no longer be changed.
+
+After claiming the ticket, your service reads the values as a JSON object by sending a ``GET`` request to ``/api/pro/tickets/<ticket_id>/params``, for example ``{"corr_mode": "shape", "flip": false, "iterations": 100}``.
 
 
 DSS REST API
@@ -168,6 +228,12 @@ TicketDeleteAPI
 ------------------------
 TicketRetryAPI
 
+/api/tickets/(\d+)/params
+-------------------------
+GET: Get the job parameters of the ticket as a JSON object
+
+POST: Set some or all of the job parameters, as a JSON object or form fields (ticket must be in ``init`` state). See :ref:`refman_service_json`.
+
 /api/tickets/logs/(\d+)/attachments
 -----------------------------------
 TicketLogAttachmentAPI
@@ -215,6 +281,10 @@ ProviderTicketAttachmentAPI
 /api/pro/tickets/(\d+)/progress
 -------------------------------
 ProviderTicketProgressAPI
+
+/api/pro/tickets/(\d+)/params
+-----------------------------
+GET: Get the job parameters of a claimed ticket as a JSON object, with defaults filled in
 
 /api/admin/providers
 --------------------
